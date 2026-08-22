@@ -1,0 +1,6 @@
+# Local build and test workspace, not part of any package
+_taller/
+
+publish-*.sh
+.DS_Store
+*.tmp

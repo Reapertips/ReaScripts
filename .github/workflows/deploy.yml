@@ -1,0 +1,32 @@
+name: deploy
+on:
+  push:
+    branches: [master, main]
+# reapack-index writes index.xml back into the repo, so the job needs more
+# than the read-only token new repositories default to.
+permissions:
+  contents: write
+jobs:
+  reapack-index:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Fetch repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Configure git
+      run: |-
+        git config user.name  'Reapertips Bot'
+        git config user.email 'bot@reapertips.com'
+    - name: Install Pandoc
+      run:  sudo apt-get install -yy pandoc
+    - name: Set up Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: 3.2
+    - name: Install reapack-index
+      run:  gem install reapack-index
+    - name: Update index.xml
+      run:  reapack-index --commit
+    - name: Push changes
+      run:  git push
