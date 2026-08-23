@@ -1,7 +1,7 @@
 --[[
   @description TunerBox
   @author Reapertips (Alejandro Hernandez)
-  @version 1.0.1
+  @version 1.0.3
   @license MIT
   @link https://www.reapertips.com
   @provides
