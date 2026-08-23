@@ -156,6 +156,7 @@ steps = 0;
 // concludes, whatever it concluded.
 function note_evidence(cl, f)
 (
+  peak_hold = max(peak_hold * 0.97, peak);
   clar_hold = max(clar_hold * 0.97, cl);
   cl >= 0.6 ? ( last_good = f; );
   gmem[GB+14] = peak_hold;

@@ -1,7 +1,7 @@
 --[[
   @description TunerBox
   @author Reapertips (Alejandro Hernandez)
-  @version 1.0.0
+  @version 1.0.1
   @license MIT
   @link https://www.reapertips.com
   @provides
@@ -92,7 +92,9 @@
     Pitch detection is a small JSFX installed alongside this script. It
     analyses the selected input and reports the frequency back through gmem.
   @changelog
-    First release.
+    - Fixed TunerBox failing to reopen when attached to a toolbar.
+    - Preserved its saved size after restarting REAPER.
+    - Corrected the audio and update-rate diagnostics.
 ]]
 
 
@@ -532,6 +534,7 @@ steps = 0;
 // concludes, whatever it concluded.
 function note_evidence(cl, f)
 (
+  peak_hold = max(peak_hold * 0.97, peak);
   clar_hold = max(clar_hold * 0.97, cl);
   cl >= 0.6 ? ( last_good = f; );
   gmem[GB+14] = peak_hold;
@@ -1626,6 +1629,12 @@ local function Verdict()
         return 'the detector is NOT RUNNING',
             'The audio engine may be off, the FX bypassed, or the track gone.'
     end
+    -- A confirmed note is stronger evidence than a peak accumulator that
+    -- has just started or reset. The three evidence slots are published
+    -- independently and can legitimately be observed between updates.
+    if good5 > 0 then
+        return ('working: last confident reading was %.2f Hz'):format(good5), ''
+    end
     if dB(peak5) < -60 then
         return 'NO AUDIO is reaching the detector',
             'Nothing above -60 dBFS in the last 5 seconds, so this is not the\n' ..
@@ -1652,9 +1661,6 @@ local function Verdict()
              'That is what a distorted, very percussive or polyphonic signal\n' ..
              'looks like. Try a clean DI, one string at a time.'):format(clar5)
     end
-    if good5 > 0 then
-        return ('working: last confident reading was %.2f Hz'):format(good5), ''
-    end
     return 'the detector found notes but the script rejected them',
         'Most likely the noise floor estimate. Try Advanced -> Noise gate.'
 end
@@ -1680,7 +1686,7 @@ function ShowTunerStatus()
         'analysis rate     : %s Hz,  max period %s\n' ..
         'lowest note sought: %s Hz   (detector is using %s Hz, was told %s)%s\n' ..
         '\n' ..
-        'JSFX updates/s   : %.1f   (expected 20-40)\n' ..
+        'JSFX updates/s   : %.1f   (20-250; silence is faster)\n' ..
         '\n' ..
         'IN THE LAST 5 SECONDS  (so you can play, then run this)\n' ..
         '  loudest input  : %.1f dBFS\n' ..
@@ -2619,18 +2625,29 @@ function LoadThemeSettings(theme_path, only_appeareance)
         settings = ExtLoad('attach_settings') or settings
     end
 
-    attach_x = settings.attach_x
-    attach_mode = settings.attach_mode
-    attach_center_x = settings.attach_center_x
-    attach_center_mode = settings.attach_center_mode
+    local function SafeNumber(v)
+        if type(v) ~= 'number' or v ~= v then return nil end
+        return v
+    end
 
-    local new_box_x = settings.box_x
-    local new_box_y = settings.box_y
-    local new_box_w = settings.box_w
-    local new_box_h = settings.box_h
+    attach_x = SafeNumber(settings.attach_x)
+    attach_mode = SafeNumber(settings.attach_mode)
+    attach_center_x = SafeNumber(settings.attach_center_x)
+    attach_center_mode = SafeNumber(settings.attach_center_mode)
 
-    if settings.measure_scale and settings.measure_scale ~= measure_scale then
-        local scale_factor = measure_scale / settings.measure_scale
+    local new_box_x = SafeNumber(settings.box_x)
+    local new_box_y = SafeNumber(settings.box_y)
+    local new_box_w = SafeNumber(settings.box_w)
+    local new_box_h = SafeNumber(settings.box_h)
+    if not new_box_x or not new_box_y or not new_box_w or not new_box_h or
+        new_box_w <= 0 or new_box_h <= 0 then
+        return false
+    end
+
+    local saved_measure_scale = SafeNumber(settings.measure_scale)
+    if saved_measure_scale and saved_measure_scale > 0 and
+        saved_measure_scale ~= measure_scale then
+        local scale_factor = measure_scale / saved_measure_scale
         new_box_x = Scale(new_box_x, scale_factor)
         new_box_y = Scale(new_box_y, scale_factor)
         new_box_w = Scale(new_box_w, scale_factor)
@@ -2639,7 +2656,18 @@ function LoadThemeSettings(theme_path, only_appeareance)
         attach_center_x = Scale(attach_center_x, scale_factor)
     end
 
-    if attach_x or attach_center_x then new_box_x = GetAttachPosition() end
+    if attach_x or attach_center_x then
+        local attached_box_x = GetAttachPosition()
+        if attached_box_x then
+            new_box_x = attached_box_x
+        else
+            -- The rectangle is still usable even if its relative anchor is
+            -- incomplete. Keep its exact position and stop tracking the bad
+            -- anchor instead of rebuilding a toolbar-sized default box.
+            attach_x, attach_mode = nil, nil
+            attach_center_x, attach_center_mode = nil, nil
+        end
+    end
     SetBoxCoords(new_box_x, new_box_y, new_box_w, new_box_h)
     return has_settings or attach_window_title ~= nil
 end
@@ -4214,7 +4242,8 @@ function FindInitialPosition()
             size = size + 1
         else
             -- Remember x position of BPM button
-            if not bpm_x and thing:sub(1, 9) == 'trans.bpm' then
+            if not bpm_x and type(thing) == 'string' and
+                thing:sub(1, 9) == 'trans.bpm' then
                 bpm_x = x
             end
             if size > 0 then
@@ -4357,7 +4386,13 @@ function FindAttachedWindow()
         end
     end
     if hwnd and attach_window_child_id then
-        hwnd = reaper.JS_Window_FindChildByID(hwnd, attach_window_child_id)
+        local child = reaper.JS_Window_FindChildByID(hwnd, attach_window_child_id)
+        if child then
+            hwnd = child
+        else
+            attach_window_child_id = nil
+            reaper.SetExtState(extname, 'attach_child_id', '', true)
+        end
     end
     return hwnd, window_cnt
 end
@@ -4425,7 +4460,13 @@ function Main()
     local hover_hwnd = reaper.JS_Window_FromPoint(mouse_x, mouse_y)
 
     do
-        local _, w, h = reaper.JS_Window_GetClientSize(window_hwnd)
+        local ok, w, h = reaper.JS_Window_GetClientSize(window_hwnd)
+        if not ok or type(w) ~= 'number' or type(h) ~= 'number' or
+            w <= 0 or h <= 0 then
+            window_hwnd = nil
+            reaper.defer(Main)
+            return
+        end
         window_w, window_h = w, h
     end
 
@@ -4945,8 +4986,8 @@ if attach_window_title then
     -- Give option to move box back to transport when user quickly toggles
     -- the script 3 times in a row (in 3 seconds)
     local curr_time = reaper.time_precise()
-    local start_cnt = ExtLoad('start_cnt', 1)
-    local start_time = ExtLoad('start_time', curr_time)
+    local start_cnt = tonumber(ExtLoad('start_cnt', 1)) or 1
+    local start_time = tonumber(ExtLoad('start_time', curr_time)) or curr_time
 
     -- Check if more than 3 seconds have passed
     if math.abs(start_time - curr_time) > 3 then
