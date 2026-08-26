@@ -32,6 +32,31 @@ Each state decides on its own which areas it paints: arrange, MIDI editor, ruler
 
 Nothing extra to install, and colors are only changed in memory, so your theme file is never touched. 
 
+## 🎸 Speed Trainer
+<img src="https://i.imgur.com/0Fvigao.png" alt="Speed Trainer" width="800">
+
+If there's a difficult section of a song you can play slowly but struggle to
+reach at full speed, **Speed Trainer helps you build up to it gradually!**
+
+Select the section, choose your starting speed and target, then decide how
+quickly you wanna get there. For example, you can start at **70%**, increase
+the speed by **5% every three loops**, and keep practicing until you reach
+**100%**.
+
+Speed Trainer handles the speed changes while you play. The ring shows where
+you are inside each repetition and warns you before the next increase. You can
+also add a count-in, hold the current speed, go back, advance, pause or stop at
+any time.
+
+You also get four companion actions for keyboard shortcuts, toolbar buttons or
+a MIDI footswitch. Super useful when your hands are busy playing!
+
+Speed Trainer changes REAPER's master playrate without editing your tempo map.
+If there isn't enough room for the count-in, it can insert the required bars at
+the start of the project in one undoable step.
+
+You need **REAPER 7.0 or newer** and **ReaImGui 0.10 or newer**.
+
 # License
 
 MIT. Check [LICENSE](LICENSE) for the third party notices.
