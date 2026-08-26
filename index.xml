@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Reapertips" commit="fba4d9f7311a51700de783b8f116c013c4a963dd">
+<index version="1" name="Reapertips" commit="f0337d07bc84d4b684d02def7f6cacf66e2fd557">
   <category name="Tuner">
     <reapack name="Reapertips_TunerBox.lua" type="script" desc="TunerBox">
       <metadata>
@@ -62,6 +62,31 @@
     </reapack>
   </category>
   <category name="Utility">
+    <reapack name="Reapertips_Speed Trainer.lua" type="script" desc="Speed Trainer">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 If there's a difficult section of a song you can play slowly but struggle to reach at full speed, {\b Speed Trainer helps you build up to it gradually!}\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Select the section, choose your starting speed and target, then decide how quickly you wanna get there. For example, you can start at {\b 70%}, increase the speed by {\b 5% every three loops}, and keep practicing until you reach {\b 100%}.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Speed Trainer handles the speed changes while you play. The ring shows where you are inside each repetition and warns you before the next increase. You can also add a count-in, hold the current speed, go back, advance, pause or stop at any time.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 You also get four companion actions for keyboard shortcuts, toolbar buttons or a MIDI footswitch. Super useful when your hands are busy playing!\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Speed Trainer changes REAPER's master playrate without editing your tempo map. If there isn't enough room for the count-in, it can insert the required bars at the start of the project in one undoable step.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 You need {\b REAPER 7.0 or newer} and {\b ReaImGui 0.10 or newer}.\par}
+}
+]]></description>
+        <link rel="website">https://www.reapertips.com</link>
+      </metadata>
+      <version name="1.0.0" author="Reapertips (Alejandro Hernandez)" time="2026-08-26T18:52:26Z">
+        <changelog><![CDATA[First release.]]></changelog>
+        <source main="main">https://github.com/Reapertips/ReaScripts/raw/f0337d07bc84d4b684d02def7f6cacf66e2fd557/Utility/Reapertips_Speed%20Trainer.lua</source>
+        <source main="main" file="Reapertips_Speed Trainer - Advance one step.lua">https://github.com/Reapertips/ReaScripts/raw/f0337d07bc84d4b684d02def7f6cacf66e2fd557/Utility/Reapertips_Speed%20Trainer%20-%20Advance%20one%20step.lua</source>
+        <source main="main" file="Reapertips_Speed Trainer - Back one step.lua">https://github.com/Reapertips/ReaScripts/raw/f0337d07bc84d4b684d02def7f6cacf66e2fd557/Utility/Reapertips_Speed%20Trainer%20-%20Back%20one%20step.lua</source>
+        <source main="main" file="Reapertips_Speed Trainer - Start pause resume.lua">https://github.com/Reapertips/ReaScripts/raw/f0337d07bc84d4b684d02def7f6cacf66e2fd557/Utility/Reapertips_Speed%20Trainer%20-%20Start%20pause%20resume.lua</source>
+        <source main="main" file="Reapertips_Speed Trainer - Toggle hold.lua">https://github.com/Reapertips/ReaScripts/raw/f0337d07bc84d4b684d02def7f6cacf66e2fd557/Utility/Reapertips_Speed%20Trainer%20-%20Toggle%20hold.lua</source>
+      </version>
+    </reapack>
     <reapack name="Reapertips_Time selection color for loop and record.lua" type="script" desc="Time selection color for loop and record">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
@@ -131,6 +156,13 @@ how to install it
 {\pard \ql \f0 \sa180 \li0 \fi0 Tints your time selection while Repeat/Loop is on, and again while REAPER is recording, so you can tell both states apart without looking away from what you're doing.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 Each state decides on its own which areas it paints: arrange, MIDI editor, ruler, or the whole ruler strip as an adjustable tint. Colors are remembered per theme, and the settings window has a live preview.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 Nothing extra to install, and colors are only changed in memory, so your theme file is never touched.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 \u55356 ?\u57272 ? Speed Trainer\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 If there's a difficult section of a song you can play slowly but struggle to reach at full speed, {\b Speed Trainer helps you build up to it gradually!}\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Select the section, choose your starting speed and target, then decide how quickly you wanna get there. For example, you can start at {\b 70%}, increase the speed by {\b 5% every three loops}, and keep practicing until you reach {\b 100%}.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Speed Trainer handles the speed changes while you play. The ring shows where you are inside each repetition and warns you before the next increase. You can also add a count-in, hold the current speed, go back, advance, pause or stop at any time.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 You also get four companion actions for keyboard shortcuts, toolbar buttons or a MIDI footswitch. Super useful when your hands are busy playing!\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Speed Trainer changes REAPER's master playrate without editing your tempo map. If there isn't enough room for the count-in, it can insert the required bars at the start of the project in one undoable step.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 You need {\b REAPER 7.0 or newer} and {\b ReaImGui 0.10 or newer}.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel0 \b \fs36 License\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 MIT. Check {\field{\*\fldinst{HYPERLINK "LICENSE"}}{\fldrslt{\ul
 LICENSE
