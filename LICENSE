@@ -33,8 +33,9 @@ Gridbox
 Ilias-Timon Poulakis (FeedTheCat)
 https://github.com/iliaspoulakis/Reaper-Tools
 
-Used by TunerBox for the window, docking and drawing engine, and by
-"Time selection color for loop and record" for the startup hook handling.
+Used by TunerBox for the window, docking and drawing engine, and by "Time
+selection color for loop and record" and Project Launcher for startup hook
+handling.
 --------------------------------------------------------------------------------
 
 MIT License

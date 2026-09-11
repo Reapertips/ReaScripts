@@ -57,6 +57,20 @@ the start of the project in one undoable step.
 
 You need **REAPER 7.0 or newer** and **ReaImGui 0.10 or newer**.
 
+## 🚀 Project Launcher
+<img src="https://i.imgur.com/clqwNoT.png" alt="Project Launcher" width="800">
+
+Project Launcher puts your recent projects, project templates and project
+folders in one window. You can search everything, check the project details
+and open it without digging through folders.
+
+Organize your templates into sections without moving any files. You can also
+open Project Launcher with REAPER, then keep it hidden when another project is
+already open.
+
+You need **ReaImGui 0.10 or newer**. **js_ReaScriptAPI** and **SWS** are
+optional.
+
 # License
 
 MIT. Check [LICENSE](LICENSE) for the third party notices.
