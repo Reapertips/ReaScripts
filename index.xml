@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Reapertips" commit="f0337d07bc84d4b684d02def7f6cacf66e2fd557">
+<index version="1" name="Reapertips" commit="b223bdc7db24fd0695e6bbdb8d67a6c37a6691d6">
   <category name="Tuner">
     <reapack name="Reapertips_TunerBox.lua" type="script" desc="TunerBox">
       <metadata>
@@ -62,6 +62,46 @@
     </reapack>
   </category>
   <category name="Utility">
+    <reapack name="Reapertips_Project Launcher.lua" type="script" desc="Project Launcher">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel0 \b \fs36 Project Launcher\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Project Launcher puts your recent projects, project templates and project folders in one window. You can search everything, check the project details and open it without digging through folders.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 Project templates\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Organize your templates into sections without moving any files. You can check the track list before opening one, then open it as a new project or edit the template itself.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 Project folders\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Add your project folders and Project Launcher scans them in the background. It remembers the results, so they are ready the next time you open it.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 Startup\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Project Launcher can open with REAPER and stay hidden when another project is already open.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 Shortcuts\par}
+{\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab {\f1 Enter} opens the selected project.\par}
+{\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab {\f1 Ctrl/Cmd} + {\f1 Enter} opens it in a new tab.\par}
+{\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab {\f1 Alt/Option} + {\f1 Enter} opens it as a new version.\par}
+{\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab {\f1 Ctrl/Cmd} + {\f1 F} jumps to search.\par}
+{\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab {\f1 Esc} clears the search or closes the window.\sa180\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 Requirements\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 You need {\b ReaImGui 0.10 or newer}. Project Launcher checks this when it starts and tells you if it is missing.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 {\b js_ReaScriptAPI} is optional. It adds modified dates and a folder picker. {\b SWS} is also optional and lets Project Launcher switch off REAPER's own startup prompt.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 Credits and license\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Project Launcher is MIT licensed.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 The startup hook handling is adapted from {\b Gridbox} by Ilias-Timon Poulakis (FeedTheCat), used under the MIT license:\par}
+{\pard \ql \f0 \sa180 \li720 \fi0 MIT License\par}
+{\pard \ql \f0 \sa180 \li720 \fi0 Copyright (c) 2020 iliaspoulakis\par}
+{\pard \ql \f0 \sa180 \li720 \fi0 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\par}
+{\pard \ql \f0 \sa180 \li720 \fi0 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\par}
+{\pard \ql \f0 \sa180 \li720 \fi0 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.\par}
+}
+]]></description>
+        <link rel="website" href="https://www.reapertips.com">Reapertips</link>
+      </metadata>
+      <version name="1.0.0" author="Reapertips (Alejandro Hernandez)" time="2026-09-11T12:36:16Z">
+        <changelog><![CDATA[First release.]]></changelog>
+        <source main="main">https://github.com/Reapertips/ReaScripts/raw/b223bdc7db24fd0695e6bbdb8d67a6c37a6691d6/Utility/Reapertips_Project%20Launcher.lua</source>
+      </version>
+    </reapack>
     <reapack name="Reapertips_Speed Trainer.lua" type="script" desc="Speed Trainer">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
@@ -163,6 +203,10 @@ how to install it
 {\pard \ql \f0 \sa180 \li0 \fi0 You also get four companion actions for keyboard shortcuts, toolbar buttons or a MIDI footswitch. Super useful when your hands are busy playing!\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 Speed Trainer changes REAPER's master playrate without editing your tempo map. If there isn't enough room for the count-in, it can insert the required bars at the start of the project in one undoable step.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 You need {\b REAPER 7.0 or newer} and {\b ReaImGui 0.10 or newer}.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 \u55357 ?\u56960 ? Project Launcher\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Project Launcher puts your recent projects, project templates and project folders in one window. You can search everything, check the project details and open it without digging through folders.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Organize your templates into sections without moving any files. You can also open Project Launcher with REAPER, then keep it hidden when another project is already open.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 You need {\b ReaImGui 0.10 or newer}. {\b js_ReaScriptAPI} and {\b SWS} are optional.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel0 \b \fs36 License\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 MIT. Check {\field{\*\fldinst{HYPERLINK "LICENSE"}}{\fldrslt{\ul
 LICENSE
