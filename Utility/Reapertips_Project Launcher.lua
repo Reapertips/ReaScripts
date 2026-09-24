@@ -1,10 +1,13 @@
 --[[
   @description Project Launcher
   @author Reapertips (Alejandro Hernandez)
-  @version 1.0.0
+  @version 1.0.1
   @license MIT
   @changelog
-    First release.
+    - The toolbar button now lights up while Project Launcher is open.
+    - Click the button again to close it. No more "new instance" prompt!
+    - Pick your own accent color in `Settings` > `General`. It's saved per theme, and `Reset` brings back your theme's color.
+    - `About` now tells you where the accent color comes from.
   @link
     Reapertips https://www.reapertips.com
   @about
@@ -85,7 +88,7 @@
 
 local SB = {
     NAME    = 'Project Launcher',
-    VERSION = '1.0.0',
+    VERSION = '1.0.1',
     EXTNAME = 'RTIPS.ProjectLauncher',
     OLD_EXTNAME = 'RTIPS.StartBox',
 }
@@ -130,7 +133,8 @@ local API_NAMES = {
     'BeginPopupContextItem', 'BeginPopupModal', 'BeginTable', 'Button',
     'Combo', 'AlignTextToFramePadding', 'NewLine', 'SetNextWindowPos',
     'CalcTextSize', 'Checkbox', 'ChildFlags_AlwaysUseWindowPadding',
-    'CloseCurrentPopup', 'Col_Border', 'Col_Button', 'Col_ButtonActive',
+    'CloseCurrentPopup', 'ColorEdit3', 'ColorEditFlags_NoInputs',
+    'Col_Border', 'Col_Button', 'Col_ButtonActive',
     'Col_ButtonHovered', 'Col_CheckMark', 'Col_ChildBg', 'Col_FrameBg',
     'Col_FrameBgActive', 'Col_FrameBgHovered', 'Col_Header',
     'Col_HeaderActive', 'Col_HeaderHovered', 'Col_ModalWindowDimBg',
@@ -1473,17 +1477,43 @@ function SB.theme_key()
     return (name:gsub('%.[Rr]eaper[Tt]heme[Zz]?[Ii]?[Pp]?$', ''))
 end
 
+-- Ext-state key for a per-theme accent override, sanitized so any theme
+-- file name turns into a safe key name.
+function SB.accent_ext_key(key)
+    return 'accent.' .. tostring(key or ''):gsub('[^%w]', '_')
+end
+
+function SB.get_accent_override(key)
+    local v = get_ext(SB.accent_ext_key(key), '')
+    if v:match('^%x%x%x%x%x%x$') then return tonumber(v, 16) end
+    return nil
+end
+
+function SB.set_accent_override(key, rgb)
+    set_ext(SB.accent_ext_key(key), ('%06X'):format(rgb & 0xFFFFFF))
+end
+
+function SB.clear_accent_override(key)
+    reaper.DeleteExtState(SB.EXTNAME, SB.accent_ext_key(key), true)
+end
+
+-- Returns the accent color and where it came from: 'custom' (a per-theme
+-- override), 'reapertips' or 'default' (the built-in themes), 'theme' (the
+-- razor edit outline color), or 'fallback' (the theme color was too dark
+-- or unavailable).
 function SB.accent_for_theme(key)
+    local override = SB.get_accent_override(key)
+    if override then return override, 'custom' end
     local lower = tostring(key or ''):lower()
-    if lower:find('reapertips', 1, true) then return 0x46B9FE end
-    if lower:find('default', 1, true) then return 0x10BD9A end
+    if lower:find('reapertips', 1, true) then return 0x46B9FE, 'reapertips' end
+    if lower:find('default', 1, true) then return 0x10BD9A, 'default' end
     local native = reaper.GetThemeColor and
         reaper.GetThemeColor('areasel_outline', 0) or -1
     if native and native >= 0 then
         local r, g, b = reaper.ColorFromNative(native)
-        if r + g + b > 60 then return (r << 16) | (g << 8) | b end
+        if r + g + b > 60 then return (r << 16) | (g << 8) | b, 'theme' end
     end
-    return 0x10BD9A
+    return 0x10BD9A, 'fallback'
 end
 
 -- Interface scale and text size. Everything with a pixel value goes
@@ -1539,7 +1569,9 @@ local C = {}
 function SB.build_palette()
     SB.style_dirty = true
     SB.theme = SB.theme_key()
-    local a = SB.accent_for_theme(SB.theme)
+    local a, source = SB.accent_for_theme(SB.theme)
+    SB.accent_rgb = a
+    SB.accent_source = source
     -- Values below are the approved mockup, one for one.
     C.accent      = rgba(a)
     C.accent_dim  = rgba(a, 0x29)   -- selected row / primary button, 16%
@@ -3255,12 +3287,55 @@ local function settings_general()
         set_bool('keep_open', keep)
     end
     hint('Off means it closes as soon as a project opens')
+
+    ImGui.Dummy(ctx, 1, PX(10))
+    ImGui.Separator(ctx)
+    ImGui.Dummy(ctx, 1, PX(4))
+    ImGui.TextColored(ctx, C.text_faint, 'APPEARANCE')
+    ImGui.Dummy(ctx, 1, PX(2))
+
+    setting_row('Accent', PX(24))
+    local rva, picked = ImGui.ColorEdit3(ctx, '##accent',
+        SB.accent_rgb or 0, ImGui.ColorEditFlags_NoInputs)
+    if rva then
+        SB.set_accent_override(SB.theme, picked)
+        SB.build_palette()
+    end
+    ImGui.SameLine(ctx)
+    ImGui.TextColored(ctx, C.text_faint, ({
+        theme      = 'From your theme',
+        reapertips = 'Theme default',
+        default    = 'Theme default',
+        fallback   = 'Default, theme color too dark',
+        custom     = 'Custom',
+    })[SB.accent_source] or '')
+    if SB.accent_source == 'custom' then
+        ImGui.SameLine(ctx)
+        if ImGui.Button(ctx, 'Reset') then
+            SB.clear_accent_override(SB.theme)
+            SB.build_palette()
+        end
+    end
+    hint('Pick a custom accent color for the current theme')
 end
 
 local function settings_about()
     ImGui.Text(ctx, ('Project Launcher %s'):format(SB.VERSION))
-    ImGui.TextColored(ctx, C.text_dim,
-        ('Accent from the "%s" theme'):format(SB.theme or '?'))
+    local accent_line
+    if SB.accent_source == 'custom' then
+        accent_line = ('Accent: custom for the "%s" theme')
+            :format(SB.theme or '?')
+    elseif SB.accent_source == 'theme' then
+        accent_line = ('Accent: razor edit outline of the "%s" theme')
+            :format(SB.theme or '?')
+    elseif SB.accent_source == 'fallback' then
+        accent_line = ('Accent: default, the "%s" theme color is too dark')
+            :format(SB.theme or '?')
+    else
+        accent_line = ('Accent: built in for the "%s" theme')
+            :format(SB.theme or '?')
+    end
+    ImGui.TextColored(ctx, C.text_dim, accent_line)
 
     ImGui.Dummy(ctx, 1, PX(10))
     ImGui.Separator(ctx)
@@ -3563,6 +3638,8 @@ function SB.main()
     reaper.atexit(function()
         reaper.DeleteExtState(SB.EXTNAME, 'heartbeat', false)
         reaper.DeleteExtState(SB.EXTNAME, 'show_ui', false)
+        -- Toolbar toggle off. REAPER 7.03+ only.
+        if reaper.set_action_options then reaper.set_action_options(8) end
     end)
 
     -- Launched from __startup.lua with a project already loaded? Stay away.
@@ -3570,6 +3647,11 @@ function SB.main()
         local _, name = reaper.EnumProjects(0)
         if name and name ~= '' then return end
     end
+
+    -- The UI loop is really starting now, so light up the toolbar toggle.
+    -- 1 = re-running the action terminates this instance instead of asking;
+    -- 4 = toggle state on. REAPER 7.03+ only.
+    if reaper.set_action_options then reaper.set_action_options(1 | 4) end
 
     SB.clipper = ImGui.CreateListClipper(ctx)
     ImGui.Attach(ctx, SB.clipper)
@@ -3592,7 +3674,10 @@ end
 
 if LAUNCHER_TEST then return SB end
 
--- A second run of the action just brings the open window to the front.
+-- REAPER < 7.03 has no set_action_options, so flag 1 above never applies and
+-- a second run does not terminate this instance: bring the open window to
+-- the front instead. On 7.03+ REAPER terminates the running instance first,
+-- so this branch is the old-REAPER fallback only.
 local beat = tonumber(reaper.GetExtState(SB.EXTNAME, 'heartbeat'))
 if beat and reaper.time_precise() - beat < 2 then
     reaper.SetExtState(SB.EXTNAME, 'show_ui', '1', false)
