@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Reapertips" commit="b223bdc7db24fd0695e6bbdb8d67a6c37a6691d6">
+<index version="1" name="Reapertips" commit="4b8360807ce449e9ffe725ac03d2171e38373f9b">
   <category name="Tuner">
     <reapack name="Reapertips_TunerBox.lua" type="script" desc="TunerBox">
       <metadata>
@@ -100,6 +100,13 @@
       <version name="1.0.0" author="Reapertips (Alejandro Hernandez)" time="2026-09-11T12:36:16Z">
         <changelog><![CDATA[First release.]]></changelog>
         <source main="main">https://github.com/Reapertips/ReaScripts/raw/b223bdc7db24fd0695e6bbdb8d67a6c37a6691d6/Utility/Reapertips_Project%20Launcher.lua</source>
+      </version>
+      <version name="1.0.1" author="Reapertips (Alejandro Hernandez)" time="2026-09-24T13:30:32Z">
+        <changelog><![CDATA[- The toolbar button now lights up while Project Launcher is open.
+- Click the button again to close it. No more "new instance" prompt!
+- Pick your own accent color in `Settings` > `General`. It's saved per theme, and `Reset` brings back your theme's color.
+- `About` now tells you where the accent color comes from.]]></changelog>
+        <source main="main">https://github.com/Reapertips/ReaScripts/raw/4b8360807ce449e9ffe725ac03d2171e38373f9b/Utility/Reapertips_Project%20Launcher.lua</source>
       </version>
     </reapack>
     <reapack name="Reapertips_Speed Trainer.lua" type="script" desc="Speed Trainer">
