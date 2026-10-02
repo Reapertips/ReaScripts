@@ -1,7 +1,7 @@
 --[[
   @description TunerBox
   @author Reapertips (Alejandro Hernandez)
-  @version 1.0.3
+  @version 1.0.4
   @license MIT
   @link https://www.reapertips.com
   @provides
@@ -92,9 +92,8 @@
     Pitch detection is a small JSFX installed alongside this script. It
     analyses the selected input and reports the frequency back through gmem.
   @changelog
-    - Fixed TunerBox failing to reopen when attached to a toolbar.
-    - Preserved its saved size after restarting REAPER.
-    - Corrected the audio and update-rate diagnostics.
+    - TunerBox no longer sits on top of GridBox, ChordBox or other boxes in the transport.
+    - It also respects the positions your theme sets for those boxes.
 ]]
 
 
@@ -2415,8 +2414,8 @@ function PrintIni()
     end
 end
 
-function LoadIntegratedSettings(theme_path)
-    local file_name = box_name:lower() .. '.ini'
+function LoadIntegratedSettings(theme_path, other_box_name)
+    local file_name = (other_box_name or box_name):lower() .. '.ini'
     if not theme_path:lower():match('%.reaperthemezip$') then
         -- Read theme file to get image resource path
         local theme_file = io.open(theme_path, 'r')
@@ -3992,6 +3991,312 @@ function ShowMenu(menu)
     drag_x = nil
 end
 
+-- ------------------------------------------------------------ neighbors --
+-- Other scripts built on the same engine (GridBox, ChordBox, PeakBox...)
+-- also draw straight onto the transport. REAPER still reports their spot as
+-- empty transport, so the stock placement would happily drop TunerBox right
+-- on top of them. These helpers find where the running ones are and keep
+-- TunerBox out of the way.
+--
+-- A neighbor is found through its ExtState section: it saves its position
+-- per theme in 'theme_settings' and its command name in 'hook_cmd_name',
+-- whose toggle state tells whether it is running right now.
+
+local neighbor_sections
+local neighbor_check_time = 0
+local prev_neighbor_sig
+
+-- Section names that look like a box: they keep 'theme_settings'. Read once
+-- from reaper-extstate.ini, since ExtState sections cannot be enumerated.
+local function FindNeighborSections()
+    if neighbor_sections then return neighbor_sections end
+    local found = {['FTC.GridBox'] = true, ['FTC.ChordBox'] = true}
+    local path = ConcatPath(reaper.GetResourcePath(), 'reaper-extstate.ini')
+    local file = io.open(path, 'r')
+    if file then
+        local section
+        for line in file:lines() do
+            local name = line:match('^%[(.-)%]%s*$')
+            if name then
+                section = name
+            elseif section and line:match('^theme_settings=') then
+                found[section] = true
+            end
+        end
+        file:close()
+    end
+    found[extname] = nil
+    neighbor_sections = {}
+    for name in pairs(found) do
+        neighbor_sections[#neighbor_sections + 1] = name
+    end
+    table.sort(neighbor_sections)
+    return neighbor_sections
+end
+
+-- Some boxes save a plain Lua table literal instead of the Gridbox format.
+-- Parse it by hand: never run a string read from disk as code.
+local function ParseLuaTable(str)
+    local pos = 1
+
+    local function Skip()
+        pos = str:find('[^%s,]', pos) or #str + 1
+    end
+
+    local ParseValue
+
+    local function ParseString()
+        local quote = str:sub(pos, pos)
+        local i = pos + 1
+        local out = {}
+        while i <= #str do
+            local c = str:sub(i, i)
+            if c == '\\' then
+                out[#out + 1] = str:sub(i + 1, i + 1)
+                i = i + 2
+            elseif c == quote then
+                pos = i + 1
+                return table.concat(out)
+            else
+                out[#out + 1] = c
+                i = i + 1
+            end
+        end
+        error('unterminated string')
+    end
+
+    local function ParseTable()
+        pos = pos + 1
+        local t = {}
+        while true do
+            Skip()
+            local c = str:sub(pos, pos)
+            if c == '}' then
+                pos = pos + 1
+                return t
+            end
+            local key
+            if c == '[' then
+                pos = pos + 1
+                Skip()
+                key = ParseValue()
+                Skip()
+                if str:sub(pos, pos) ~= ']' then error('bad key') end
+                pos = pos + 1
+            else
+                key = str:match('^[%a_][%w_]*', pos)
+                if not key then error('bad key') end
+                pos = pos + #key
+            end
+            Skip()
+            if str:sub(pos, pos) ~= '=' then error('missing =') end
+            pos = pos + 1
+            Skip()
+            t[key] = ParseValue()
+        end
+    end
+
+    ParseValue = function()
+        local c = str:sub(pos, pos)
+        if c == '{' then return ParseTable() end
+        if c == '"' or c == "'" then return ParseString() end
+        local word = str:match('^[%w%.%+%-]+', pos)
+        if not word then error('bad value') end
+        pos = pos + #word
+        if word == 'true' then return true end
+        if word == 'false' then return false end
+        local n = tonumber(word)
+        if n == nil then error('bad value') end
+        return n
+    end
+
+    Skip()
+    if str:sub(pos, pos) ~= '{' then return end
+    local ok, ret = pcall(ParseValue)
+    if ok and type(ret) == 'table' then return ret end
+end
+
+-- A theme can ship a position for a box (gridbox.ini, chordbox.ini...).
+-- The box uses it when nothing is saved for that theme, so we do too.
+-- Reading it may mean opening the theme zip, so keep the result.
+local integrated_cache = {}
+
+local function LoadNeighborIntegrated(section, theme_key)
+    local name = section:match('([^.]+)$')
+    local cache_key = section .. '|' .. theme_key
+    local cached = integrated_cache[cache_key]
+    if cached ~= nil then return cached or nil end
+    local config
+    local theme_file = GetThemeFromKey(theme_key)
+    if theme_file then
+        local ok, ret = pcall(LoadIntegratedSettings, theme_file, name)
+        if ok and type(ret) == 'table' then config = ret end
+    end
+    integrated_cache[cache_key] = config or false
+    return config
+end
+
+local function LoadNeighborSettings(section)
+    local theme_key = GetThemeKey(prev_color_theme)
+    local str = reaper.GetExtState(section, 'theme_settings')
+    local settings
+    if str:sub(1, 2) == 't:' then
+        local ok, ret = pcall(Deserialize, str)
+        if ok then settings = ret end
+    elseif str ~= '' then
+        settings = ParseLuaTable(str)
+    end
+    if type(settings) == 'table' and type(settings[theme_key]) == 'table' then
+        return settings[theme_key]
+    end
+    return LoadNeighborIntegrated(section, theme_key)
+end
+
+local function IsNeighborRunning(section)
+    local cmd_name = reaper.GetExtState(section, 'hook_cmd_name')
+    if cmd_name == '' then return false end
+    local cmd_id = reaper.NamedCommandLookup(cmd_name)
+    if not cmd_id or cmd_id == 0 then return false end
+    return reaper.GetToggleCommandState(cmd_id) == 1
+end
+
+-- Turn a neighbor's saved settings into a rectangle in transport client
+-- coordinates, the same way GetAttachPosition does it for our own box.
+local function NeighborRect(s)
+    local function Num(v)
+        if type(v) ~= 'number' or v ~= v then return nil end
+        return v
+    end
+    -- Boxes with several styles save one size per style; assume the largest
+    local w = Num(s.box_w)
+    local h = Num(s.box_h)
+    for key, v in pairs(s) do
+        if type(key) == 'string' and Num(v) then
+            if key:match('^box_w_') then w = math.max(w or 0, v) end
+            if key:match('^box_h_') then h = math.max(h or 0, v) end
+        end
+    end
+    local x, y = Num(s.box_x), Num(s.box_y)
+    if not x or not y or not w or not h or w <= 0 or h <= 0 then return end
+
+    local scale = 1
+    local saved_scale = Num(s.measure_scale)
+    if saved_scale and saved_scale > 0 then scale = measure_scale / saved_scale end
+
+    local is_centered = reaper.GetToggleCommandState(40533) == 1
+    local ax, mode
+    if is_centered then
+        ax = Num(s.attach_center_x) or Num(s.attach_x)
+        mode = Num(s.attach_center_mode) or Num(s.attach_mode)
+    else
+        ax = Num(s.attach_x) or Num(s.attach_center_x)
+        mode = Num(s.attach_mode) or Num(s.attach_center_mode)
+    end
+    if ax and mode then
+        ax = ax * scale
+        if mode == 1 then x = ax end
+        if mode == 2 then x = ax + window_w end
+        if mode == 3 or mode == 4 then
+            local st_l, _, st_r = GetStatusWindowClientRect()
+            x = ax + (mode == 3 and st_l or st_r)
+        end
+    else
+        x = x * scale
+    end
+    return {x = x, y = y * scale, w = w * scale, h = h * scale}
+end
+
+-- Rectangles taken by running neighbors on the transport. A running
+-- neighbor with nothing saved for this theme sits where the stock placement
+-- puts a box, so it gets the default rectangle passed in.
+function GetNeighborRects(default_rect)
+    local rects = {}
+    for _, section in ipairs(FindNeighborSections()) do
+        if IsNeighborRunning(section) and
+            reaper.GetExtState(section, 'attach_title') == '' then
+            local settings = LoadNeighborSettings(section)
+            local rect = settings and NeighborRect(settings)
+            rect = rect or default_rect
+            if rect then rects[#rects + 1] = rect end
+        end
+    end
+    return rects
+end
+
+local function GetNeighborSignature()
+    local sig = {}
+    for _, section in ipairs(FindNeighborSections()) do
+        if IsNeighborRunning(section) then sig[#sig + 1] = section end
+    end
+    return table.concat(sig, ',')
+end
+
+function IsReservedX(reserved, x, y, h)
+    for _, r in ipairs(reserved) do
+        if x >= r.x and x < r.x + r.w and y < r.y + r.h and y + h > r.y then
+            return true
+        end
+    end
+    return false
+end
+
+local function OverlapsAny(rects, x, y, w, h)
+    for _, r in ipairs(rects) do
+        if x < r.x + r.w and x + w > r.x and y < r.y + r.h and y + h > r.y then
+            return true
+        end
+    end
+    return false
+end
+
+-- Where the stock placement puts a box. Any running neighbor with nothing
+-- saved for this theme is sitting right there. Leaves our box untouched.
+local function GetDefaultRect()
+    local saved = {box_x, box_y, box_w, box_h, attach_x, attach_mode,
+        attach_center_x, attach_center_mode}
+    PlaceInEmptyArea()
+    local rect = {x = box_x, y = box_y, w = box_w, h = box_h}
+    box_x, box_y, box_w, box_h = saved[1], saved[2], saved[3], saved[4]
+    attach_x, attach_mode = saved[5], saved[6]
+    attach_center_x, attach_center_mode = saved[7], saved[8]
+    return rect
+end
+
+function FindInitialPosition()
+    PlaceInEmptyArea()
+    local default_rect = {x = box_x, y = box_y, w = box_w, h = box_h}
+    local reserved = GetNeighborRects(default_rect)
+    if #reserved == 0 then return end
+    PlaceInEmptyArea(reserved)
+end
+
+-- Move away from a neighbor we overlap. Runs when the theme loads and
+-- whenever a neighbor starts or stops. A position the user saved is kept
+-- unless it really collides, and then the new one is saved in its place.
+function AvoidNeighbors(force)
+    if attach_window_title or drag_x or not box_x or not window_w then return end
+    local time = reaper.time_precise()
+    if not force and time < neighbor_check_time + 1 then return end
+    neighbor_check_time = time
+
+    local sig = GetNeighborSignature()
+    if not force and sig == prev_neighbor_sig then return end
+    prev_neighbor_sig = sig
+    if sig == '' then return end
+
+    local x, y, w, h = box_x, box_y, box_w, box_h
+    local rects = GetNeighborRects(GetDefaultRect())
+    if not OverlapsAny(rects, x, y, w, h) then return end
+
+    FindInitialPosition()
+    EnsureBoxVisible()
+    local theme_settings = ExtLoad('theme_settings', {})
+    if theme_settings[GetThemeKey(prev_color_theme)] ~= nil then
+        SaveThemeSettings(prev_color_theme)
+    end
+    is_resize = true
+end
+
 function GetStatusWindowClientRect()
     -- Get status window coordinates
     local status_hwnd = reaper.JS_Window_FindChildByID(window_hwnd, 1010)
@@ -4208,7 +4513,7 @@ function EnsureBoxVisible()
     SetBoxCoords(x, y, w, h)
 end
 
-function FindInitialPosition()
+function PlaceInEmptyArea(reserved)
     -- Get status window coordinates
     local st_l, st_t, st_r, st_b = GetStatusWindowClientRect()
     local st_y = st_t
@@ -4236,6 +4541,10 @@ function FindInitialPosition()
 
     local function AddEmptyArea(x, y, align)
         local _, thing = reaper.GetThingFromPoint(x, y)
+        if thing == 'trans' and reserved then
+            local cx = reaper.JS_Window_ScreenToClient(window_hwnd, x, y)
+            if IsReservedX(reserved, cx, box_y, box_h) then thing = nil end
+        end
 
         if thing == 'trans' then
             -- Empty transport area, increase size
@@ -4479,6 +4788,7 @@ function Main()
             FindInitialPosition()
         end
         EnsureBoxVisible()
+        AvoidNeighbors(true)
         is_resize = true
     end
 
@@ -4859,6 +5169,9 @@ function Main()
 
     -- (the tuner's periodic work runs at the top of Main, so that it still
     -- happens while the transport window is hidden)
+
+    -- step aside if a neighbor box (GridBox, ChordBox...) starts on our spot
+    AvoidNeighbors()
 
     if is_resize then
         -- Prepare LICE bitmap for drawing
