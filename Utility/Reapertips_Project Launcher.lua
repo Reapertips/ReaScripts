@@ -1,13 +1,10 @@
 --[[
   @description Project Launcher
   @author Reapertips (Alejandro Hernandez)
-  @version 1.0.1
+  @version 1.0.2
   @license MIT
   @changelog
-    - The toolbar button now lights up while Project Launcher is open.
-    - Click the button again to close it. No more "new instance" prompt!
-    - Pick your own accent color in `Settings` > `General`. It's saved per theme, and `Reset` brings back your theme's color.
-    - `About` now tells you where the accent color comes from.
+    - Show the time next to the date in the `Modified` column. Turn it on in `Settings` > `General`.
   @link
     Reapertips https://www.reapertips.com
   @about
@@ -88,7 +85,7 @@
 
 local SB = {
     NAME    = 'Project Launcher',
-    VERSION = '1.0.1',
+    VERSION = '1.0.2',
     EXTNAME = 'RTIPS.ProjectLauncher',
     OLD_EXTNAME = 'RTIPS.StartBox',
 }
@@ -297,11 +294,12 @@ function SB.human_time(seconds)
     return string.format('%d:%02d', m, s)
 end
 
--- One shape for every date in the column: 08/20/26. Relative words like
--- "yesterday" read nicely on their own but wreck a column you scan.
-function SB.relative_date(stamp)
+-- One shape for every date in the column: 08/20/26, or 08/20/26 14:05 with
+-- the time on. Relative words like "yesterday" read nicely on their own but
+-- wreck a column you scan.
+function SB.relative_date(stamp, with_time)
     if not stamp or stamp <= 0 then return '' end
-    return os.date('%m/%d/%y', stamp)
+    return os.date(with_time and '%m/%d/%y %H:%M' or '%m/%d/%y', stamp)
 end
 
 -- Diagnostics for the one thing that depends on another extension.
@@ -507,6 +505,7 @@ function SB.cfg_load()
     reaper.DeleteExtState(SB.EXTNAME, 'depth', true)
     SB.cfg.hide_missing  = get_bool('hide_missing', true)
     SB.cfg.keep_open     = get_bool('keep_open', false)
+    SB.cfg.show_time     = get_bool('show_time', false)
     SB.cfg.skip_if_open  = get_bool('skip_if_open', true)
     SB.cfg.view          = get_ext('view', 'recent')
     SB.cfg.open_on       = get_ext('open_on', 'last')
@@ -2606,8 +2605,11 @@ local function draw_list(width, height)
         -- widths it measured at the old one forever.
         -- Templates want different columns from projects, so they get
         -- their own remembered layout rather than fighting over one.
-        local table_id = ('items_v2#%s_%d_%d'):format(tostring(S.view),
-            math.floor(SB.ui.scale * 100 + 0.5), math.floor(SB.ui.font * 100 + 0.5))
+        -- The time toggle is in the key too, so MODIFIED gets the width that
+        -- fits what it shows.
+        local table_id = ('items_v2#%s_%d_%d%s'):format(tostring(S.view),
+            math.floor(SB.ui.scale * 100 + 0.5), math.floor(SB.ui.font * 100 + 0.5),
+            SB.cfg.show_time and '_t' or '')
         if ImGui.BeginTable(ctx, table_id, 7, flags, 0, table_h) then
             -- Inside a scrolling table the cells belong to an inner window, so
             -- the draw list has to be fetched here, not before BeginTable.
@@ -2635,7 +2637,8 @@ local function draw_list(width, height)
                 ImGui.TableColumnFlags_WidthFixed |
                 ImGui.TableColumnFlags_PreferSortDescending |
                 ((HAS_JS and not tpl) and 0
-                    or ImGui.TableColumnFlags_DefaultHide), LPX(92))
+                    or ImGui.TableColumnFlags_DefaultHide),
+                LPX(SB.cfg.show_time and 132 or 92))
             ImGui.TableSetupColumn(ctx, 'SIZE',
                 ImGui.TableColumnFlags_WidthFixed |
                 ImGui.TableColumnFlags_DefaultHide |
@@ -2852,7 +2855,8 @@ local function draw_list(width, height)
                         if ImGui.TableSetColumnIndex(ctx, 4) then
                             local when = not item.missing and SB.value_of(item, 4)
                             right_text(when and when ~= 0
-                                and SB.relative_date(when) or '-', C.text_dim)
+                                and SB.relative_date(when, SB.cfg.show_time)
+                                or '-', C.text_dim)
                         end
 
                         if ImGui.TableSetColumnIndex(ctx, 5) then
@@ -3317,6 +3321,15 @@ local function settings_general()
         end
     end
     hint('Pick a custom accent color for the current theme')
+
+    ImGui.Dummy(ctx, 1, PX(2))
+    local rvt, show_time = ImGui.Checkbox(ctx,
+        'Show the time in the Modified column', SB.cfg.show_time)
+    if rvt then
+        SB.cfg.show_time = show_time
+        set_bool('show_time', show_time)
+    end
+    hint('Adds the hour and minute next to each date')
 end
 
 local function settings_about()
