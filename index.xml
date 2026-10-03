@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Reapertips" commit="a38458d951fd1bc4d189420bf10f3b26f4bbaa7e">
+<index version="1" name="Reapertips" commit="481e204aef440abf2863212ca20731ecea3fcc7d">
   <category name="Tuner">
     <reapack name="Reapertips_TunerBox.lua" type="script" desc="TunerBox">
       <metadata>
@@ -121,6 +121,10 @@
 - Pick your own accent color in `Settings` > `General`. It's saved per theme, and `Reset` brings back your theme's color.
 - `About` now tells you where the accent color comes from.]]></changelog>
         <source main="main">https://github.com/Reapertips/ReaScripts/raw/4b8360807ce449e9ffe725ac03d2171e38373f9b/Utility/Reapertips_Project%20Launcher.lua</source>
+      </version>
+      <version name="1.0.2" author="Reapertips (Alejandro Hernandez)" time="2026-10-03T17:45:51Z">
+        <changelog><![CDATA[- Show the time next to the date in the `Modified` column. Turn it on in `Settings` > `General`.]]></changelog>
+        <source main="main">https://github.com/Reapertips/ReaScripts/raw/481e204aef440abf2863212ca20731ecea3fcc7d/Utility/Reapertips_Project%20Launcher.lua</source>
       </version>
     </reapack>
     <reapack name="Reapertips_Speed Trainer.lua" type="script" desc="Speed Trainer">
