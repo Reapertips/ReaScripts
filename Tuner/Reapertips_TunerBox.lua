@@ -1,7 +1,7 @@
 --[[
   @description TunerBox
   @author Reapertips (Alejandro Hernandez)
-  @version 1.0.4
+  @version 1.0.5
   @license MIT
   @link https://www.reapertips.com
   @provides
@@ -92,8 +92,8 @@
     Pitch detection is a small JSFX installed alongside this script. It
     analyses the selected input and reports the frequency back through gmem.
   @changelog
-    - TunerBox no longer sits on top of GridBox, ChordBox or other boxes in the transport.
-    - It also respects the positions your theme sets for those boxes.
+    - Fixed: after loading a project in the same tab, TunerBox could keep switching off the master send of one of your tracks.
+    - A tuner track saved in a project now listens to the input you picked.
 ]]
 
 
@@ -1140,6 +1140,21 @@ function FindTunerTrack()
     end
 end
 
+-- True only for OUR track in the tuner's project. A handle is not enough:
+-- once a track is deleted (closing or loading a project in the same tab,
+-- an undo) REAPER can give its address to a user track, and ValidatePtr2
+-- then happily says yes. Anything that writes to the tuner track goes
+-- through this, so a recycled handle can never touch a user's track.
+function IsTunerTrack(track)
+    if not track or
+        not reaper.ValidatePtr2(TunerProj(), track, 'MediaTrack*') then
+        return false
+    end
+    local tagged = reaper.GetSetMediaTrackInfo_String(track,
+        'P_EXT:' .. TRACK_TAG, '', false)
+    return tagged == true
+end
+
 function AddTunerFX(track)
     local names = {JSFX_REL_PATH}
     for _, dir in ipairs(JSFX_DIRS) do names[#names + 1] = dir .. '/' .. JSFX_FILE end
@@ -1270,9 +1285,7 @@ end
 -- puts it back.
 function MaintainTunerTrack()
     local track = T.track
-    if not track or not reaper.ValidatePtr2(TunerProj(), track, 'MediaTrack*') then
-        return
-    end
+    if not IsTunerTrack(track) then return end
     -- Record mode is the safety property, not a preference: restore it even
     -- if the user changed it, because a capturing record mode on a hidden
     -- armed track is how you end up with a stray file after a take.
@@ -1286,9 +1299,8 @@ end
 
 function EnsureTunerTrack()
     local track = T.track
-    if track and reaper.ValidatePtr2(TunerProj(), track, 'MediaTrack*') then
-        return track
-    end
+    if IsTunerTrack(track) then return track end
+    T.track = nil
     -- A track this project was saved with, or one an undo brought back.
     track = FindTunerTrack()
     if track then
@@ -1302,13 +1314,21 @@ function EnsureTunerTrack()
         else
             T.fx = 0
         end
-        reaper.SetMediaTrackInfo_Value(track, 'I_RECINPUT', T.input)
+        -- Only write what differs: every write can mark the project as
+        -- modified, and a saved track is usually already right.
+        local V = reaper.GetMediaTrackInfo_Value
+        local Set = reaper.SetMediaTrackInfo_Value
+        if V(track, 'I_RECINPUT') ~= T.input then
+            Set(track, 'I_RECINPUT', T.input)
+        end
         -- A track saved by an older build, or edited by hand, can arrive in
         -- a capturing record mode. Fix that before arming it, not on the
         -- next periodic pass a second later.
         ArmTunerTrack(track)
-        reaper.SetMediaTrackInfo_Value(track, 'B_SHOWINTCP', 0)
-        reaper.SetMediaTrackInfo_Value(track, 'B_SHOWINMIXER', 0)
+        if V(track, 'B_SHOWINTCP') ~= 0 then Set(track, 'B_SHOWINTCP', 0) end
+        if V(track, 'B_SHOWINMIXER') ~= 0 then
+            Set(track, 'B_SHOWINMIXER', 0)
+        end
         return track
     end
     return CreateTunerTrack()
@@ -1318,7 +1338,7 @@ function SetTunerInput(input)
     T.input = input
     reaper.SetExtState(extname, 'input', input, true)
     local track = T.track
-    if track and reaper.ValidatePtr(track, 'MediaTrack*') then
+    if IsTunerTrack(track) then
         reaper.SetMediaTrackInfo_Value(track, 'I_RECINPUT', input)
         -- Re-arm so REAPER picks up the new input
         reaper.SetMediaTrackInfo_Value(track, 'I_RECARM', 0)
@@ -1666,7 +1686,7 @@ end
 
 function ShowTunerStatus()
     local track = T.track
-    local valid = track and reaper.ValidatePtr2(TunerProj(), track, 'MediaTrack*')
+    local valid = IsTunerTrack(track)
     local rms = GRead(GB + 4)
     local verdict, advice = Verdict()
 
@@ -1747,7 +1767,7 @@ function OpenBigTuner()
     if not T.on then SetTunerEnabled(true) end
 
     local track = T.track
-    if not track or not reaper.ValidatePtr(track, 'MediaTrack*') then
+    if not IsTunerTrack(track) then
         track = EnsureTunerTrack()
     end
     -- Report and clear any error rather than leaving it set: a stale T.err
@@ -1800,10 +1820,9 @@ function SetTunerEnabled(enable)
         -- by a previous session is adopted where it sits rather than
         -- deleted and recreated at the end of the track list: re-using it
         -- is both tidier to look at and one fewer change to the project.
-        local existing = FindTunerTrack()
-        RemoveAllTunerTracks(existing)
-        T.track = existing
-        if existing then T.proj = reaper.EnumProjects(-1) end
+        -- EnsureTunerTrack does the adopting, so the saved track goes
+        -- through the same checks (input, arm, hidden) as any other.
+        RemoveAllTunerTracks(FindTunerTrack())
         GWrite(GB + 9, 0)
         T.floor = 1
         EnsureTunerTrack()
@@ -1965,17 +1984,16 @@ function TunerTick()
     GWrite(GB + 10, T.gate)
     GWrite(GB + 17, T.low_hz)
 
-    MaintainTunerTrack()
-    local track = T.track
-    if not track or
-        not reaper.ValidatePtr2(TunerProj(), track, 'MediaTrack*') then
+    if not IsTunerTrack(T.track) then
         EnsureTunerTrack()
         if T.err then
             reaper.MB(T.err, box_name, 0)
             T.err = nil
             SetTunerEnabled(false)
+            return
         end
     end
+    MaintainTunerTrack()
 end
 
 -- Recomputes whether the tuner is in a project tab other than the one it
@@ -2003,7 +2021,7 @@ function TunerTooltip()
     end
     if T.on then
         local track = T.track
-        if track and reaper.ValidatePtr2(TunerProj(), track, 'MediaTrack*')
+        if IsTunerTrack(track)
             and reaper.GetMediaTrackInfo_Value(track, 'I_RECARM') ~= 1 then
             return 'Tuner track is not record armed - switch the tuner off \z
                 and on to fix it'
