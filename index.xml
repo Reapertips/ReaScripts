@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Reapertips" commit="481e204aef440abf2863212ca20731ecea3fcc7d">
+<index version="1" name="Reapertips" commit="12a74f121765814b01b75472fcfa1ac74ff4fba6">
   <category name="Tuner">
     <reapack name="Reapertips_TunerBox.lua" type="script" desc="TunerBox">
       <metadata>
@@ -150,6 +150,14 @@
         <source main="main" file="Reapertips_Speed Trainer - Back one step.lua">https://github.com/Reapertips/ReaScripts/raw/f0337d07bc84d4b684d02def7f6cacf66e2fd557/Utility/Reapertips_Speed%20Trainer%20-%20Back%20one%20step.lua</source>
         <source main="main" file="Reapertips_Speed Trainer - Start pause resume.lua">https://github.com/Reapertips/ReaScripts/raw/f0337d07bc84d4b684d02def7f6cacf66e2fd557/Utility/Reapertips_Speed%20Trainer%20-%20Start%20pause%20resume.lua</source>
         <source main="main" file="Reapertips_Speed Trainer - Toggle hold.lua">https://github.com/Reapertips/ReaScripts/raw/f0337d07bc84d4b684d02def7f6cacf66e2fd557/Utility/Reapertips_Speed%20Trainer%20-%20Toggle%20hold.lua</source>
+      </version>
+      <version name="1.0.1" author="Reapertips (Alejandro Hernandez)" time="2026-10-25T02:54:00Z">
+        <changelog><![CDATA[Fix an error on launch with ReaImGui 0.10.0.5 and newer.]]></changelog>
+        <source main="main">https://github.com/Reapertips/ReaScripts/raw/12a74f121765814b01b75472fcfa1ac74ff4fba6/Utility/Reapertips_Speed%20Trainer.lua</source>
+        <source main="main" file="Reapertips_Speed Trainer - Advance one step.lua">https://github.com/Reapertips/ReaScripts/raw/12a74f121765814b01b75472fcfa1ac74ff4fba6/Utility/Reapertips_Speed%20Trainer%20-%20Advance%20one%20step.lua</source>
+        <source main="main" file="Reapertips_Speed Trainer - Back one step.lua">https://github.com/Reapertips/ReaScripts/raw/12a74f121765814b01b75472fcfa1ac74ff4fba6/Utility/Reapertips_Speed%20Trainer%20-%20Back%20one%20step.lua</source>
+        <source main="main" file="Reapertips_Speed Trainer - Start pause resume.lua">https://github.com/Reapertips/ReaScripts/raw/12a74f121765814b01b75472fcfa1ac74ff4fba6/Utility/Reapertips_Speed%20Trainer%20-%20Start%20pause%20resume.lua</source>
+        <source main="main" file="Reapertips_Speed Trainer - Toggle hold.lua">https://github.com/Reapertips/ReaScripts/raw/12a74f121765814b01b75472fcfa1ac74ff4fba6/Utility/Reapertips_Speed%20Trainer%20-%20Toggle%20hold.lua</source>
       </version>
     </reapack>
     <reapack name="Reapertips_Time selection color for loop and record.lua" type="script" desc="Time selection color for loop and record">
