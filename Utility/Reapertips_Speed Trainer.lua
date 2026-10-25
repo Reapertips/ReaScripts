@@ -1,7 +1,7 @@
 --[[
   @description Speed Trainer
   @author Reapertips (Alejandro Hernandez)
-  @version 1.0.0
+  @version 1.0.1
   @license MIT
   @link https://www.reapertips.com
   @provides
@@ -34,7 +34,7 @@
 
     You need **REAPER 7.0 or newer** and **ReaImGui 0.10 or newer**.
   @changelog
-    First release.
+    Fix an error on launch with ReaImGui 0.10.0.5 and newer.
 ]]
 
 -- Speed Trainer - practice a looped section while REAPER raises the playrate.
@@ -1810,6 +1810,10 @@ function ST.frame()
         else
             draw_running()
         end
+        -- The screens place things with SetCursorPos. ReaImGui 0.10 raises
+        -- in End when the last cursor move is not followed by an item, so
+        -- close every screen with an empty one.
+        ImGui.Dummy(ctx, 0, 0)
         -- Space belongs to REAPER's transport and is never swallowed here.
         if ImGui.IsKeyPressed(ctx, ImGui.Key_Escape) then open = false end
     end
