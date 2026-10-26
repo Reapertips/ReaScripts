@@ -24,7 +24,7 @@ A chromatic tuner that lives right in your transport bar. Click the tuning fork 
 This one needs the **js_ReaScriptAPI** extension. ReaPack will offer to install it for you.
 
 ## 🔴 Time selection color for loop and record
-<img src="https://i.imgur.com/ikfAVee.png" alt="Time selection color for loop and record" width="800">
+<img src="https://i.imgur.com/LwuwGSZ.png" alt="Time selection color for loop and record" width="800">
 
 Tints your time selection while Repeat/Loop is on, and again while REAPER is recording, so you can tell both states apart without looking away from what you're doing.
 
