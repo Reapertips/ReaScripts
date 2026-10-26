@@ -1,7 +1,7 @@
 --[[
   @description Time selection color for loop and record
   @author Reapertips (Alejandro Hernandez)
-  @version 1.1
+  @version 1.2
   @license MIT
   @link
     Reapertips https://www.reapertips.com
@@ -28,6 +28,14 @@
     Every one of those has its own intensity slider, per state: drag it down
     and the colour is mixed with your theme's own instead of replacing it, so
     you can go from a hint to full strength.
+    Each area can also have its own colour: click the small swatch at the end
+    of its row. A dot marks the areas that have one; right click the swatch
+    to go back to the column colour.
+    Clicking any swatch opens a small Hue / Saturation / Brightness picker
+    right under it, with nine preset colours on top. Changes show at once; More... opens REAPER's own picker.
+    When the whole ruler strip is painted bright, the bar numbers turn dark
+    on their own, and the loop bar is pushed lighter or darker so it never
+    disappears into the strip.
     ## Safety
     Colours are changed in memory only, so your `.ReaperTheme` file is never
     written to. Even a crash cannot leave a permanent change: restarting
@@ -59,16 +67,18 @@
       TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
       SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   @changelog
-    1.1 - Fixes the arrange and ruler rows, which were the wrong way round in
-          1.0: what the matrix called "arrange" was painting the ruler and the
-          other way round. If you set it up under 1.0, take one look at the
-          matrix after updating.
-        - Every cell now has its own intensity, so loop and record can be as
-          strong or as subtle as you like, area by area. Replaces the single
-          ruler-strip tint slider; your old value carries over.
-        - Areas are listed in a more useful order, and the arrange overlay is
-          off out of the box.
-    1.0 - Initial release.
+    - Every area can have its own colour: click the swatch at the end of its
+      row. A dot marks the areas that have one; right click the swatch to
+      follow the column colour again.
+    - Colours are picked in a small Hue / Saturation / Brightness popover
+      under the swatch, with nine preset colours and live changes. REAPER's
+      picker is one click away under More...
+    - Cleaner settings window: plain check marks, one column per state
+      (check, bar, swatch), and the % only shows while you drag.
+    - The bar numbers turn dark when the painted ruler strip is bright, so
+      they stay readable at any colour.
+    - The loop bar no longer disappears when the ruler strip is painted in
+      the same colour: it is pushed lighter or darker automatically.
 --]]
 
 ------------------------------------------------------------------------------
@@ -121,7 +131,21 @@ local STATES = {
 }
 
 -- Read for the preview only; never painted.
-local PREVIEW_KEYS = { 'marker_lane_bg', 'col_arrangebg' }
+local PREVIEW_KEYS = { 'col_arrangebg' }
+
+-- The bar numbers and ticks in the ruler. Never painted with the user's
+-- color: only flipped to dark or light when a painted ruler strip would make
+-- the theme's own text hard to read.
+local TEXT_KEYS = {
+    { key = 'col_tl_fg',  dark = { 0x16, 0x16, 0x16 }, light = { 0xEE, 0xEE, 0xEE } },
+    { key = 'col_tl_fg2', dark = { 0x3C, 0x3C, 0x3C }, light = { 0xB4, 0xB4, 0xB4 } },
+}
+
+-- Minimum brightness difference (0..1) before the text or the loop bar is
+-- pushed away from a painted ruler strip.
+local TEXT_CONTRAST = 0.40
+local BAR_CONTRAST  = 0.20
+local BAR_PUSH      = 0.60
 
 -- Painted out of the box: the loop bar in the ruler and the MIDI editor. The
 -- arrange overlay is off, it covers a lot of screen and not everyone wants it.
@@ -145,7 +169,7 @@ local THEME_PRESETS = {
 }
 
 -- Window metrics in points; everything is multiplied by the display scale.
-local W, H  = 480, 388
+local W, H  = 480, 332
 local FONT  = 'Fira Sans' -- the OS substitutes if missing; the layout measures
 local FSIZE = 15
 
@@ -177,6 +201,22 @@ local function Blend(base, hex, amount)
         math.floor(br + (r - br) * amount + 0.5),
         math.floor(bg + (g - bg) * amount + 0.5),
         math.floor(bb + (b - bb) * amount + 0.5))
+end
+
+-- Mix two native colors.
+local function MixNative(base, over, amount)
+    local br, bg, bb = reaper.ColorFromNative(base)
+    local r, g, b = reaper.ColorFromNative(over)
+    return reaper.ColorToNative(
+        math.floor(br + (r - br) * amount + 0.5),
+        math.floor(bg + (g - bg) * amount + 0.5),
+        math.floor(bb + (b - bb) * amount + 0.5))
+end
+
+-- Perceived brightness, 0..1
+local function Luma(native)
+    local r, g, b = reaper.ColorFromNative(native)
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255
 end
 
 local function NativeToHex(native)
@@ -407,8 +447,25 @@ local function TooClose(hex, native)
     return math.abs(r1 - r2) + math.abs(g1 - g2) + math.abs(b1 - b2) < 90
 end
 
-local function LoadPalette()
-    theme_key = ThemeKey()
+-- Any area can have its own color; without one it uses its column's color.
+local function RowKey(state, zone)
+    return 'row.' .. theme_key .. '.' .. state .. '.' .. zone
+end
+
+local function LoadRowColors()
+    palette.row = {}
+    for _, st in ipairs(STATES) do
+        palette.row[st.id] = {}
+        for _, z in ipairs(ZONES) do
+            local hex = GetExt(RowKey(st.id, z.id), ''):upper()
+            if hex:match('^%x%x%x%x%x%x$') then
+                palette.row[st.id][z.id] = hex
+            end
+        end
+    end
+end
+
+local function LoadColumnColors()
     local stored = GetExt('theme.' .. theme_key, '')
     local loop, rec = stored:match('^(%x%x%x%x%x%x),(%x%x%x%x%x%x)$')
     if loop then
@@ -434,12 +491,40 @@ local function LoadPalette()
     palette = { loop = hex, rec = DEFAULT_REC }
 end
 
+local function LoadPalette()
+    theme_key = ThemeKey()
+    LoadColumnColors()
+    LoadRowColors()
+end
+
 local function SavePalette()
     SetExt('theme.' .. theme_key, palette.loop .. ',' .. palette.rec)
 end
 
+local function ZoneColor(state, zone)
+    return palette.row[state][zone] or palette[state]
+end
+
+-- nil goes back to the column color. nosave: memory only, while a color is
+-- being dragged; the popover saves once it closes.
+local function SetRowColor(state, zone, hex, nosave)
+    if hex == palette[state] then hex = nil end
+    palette.row[state][zone] = hex
+    if nosave then return end
+    if hex then
+        SetExt(RowKey(state, zone), hex)
+    else
+        reaper.DeleteExtState(extname, RowKey(state, zone), true)
+    end
+end
+
 local function ResetPalette()
     reaper.DeleteExtState(extname, 'theme.' .. theme_key, true)
+    for _, st in ipairs(STATES) do
+        for _, z in ipairs(ZONES) do
+            reaper.DeleteExtState(extname, RowKey(st.id, z.id), true)
+        end
+    end
     LoadPalette()
 end
 
@@ -482,6 +567,9 @@ local function RescanZones()
         end
         z.supported = #z.live > 0
     end
+    for _, t in ipairs(TEXT_KEYS) do
+        t.live = reaper.GetThemeColor(t.key, 0) >= 0
+    end
 end
 
 local function CaptureBaseline()
@@ -489,6 +577,9 @@ local function CaptureBaseline()
     RescanZones()
     for _, z in ipairs(ZONES) do
         for _, key in ipairs(z.live) do Baseline(key) end
+    end
+    for _, t in ipairs(TEXT_KEYS) do
+        if t.live then Baseline(t.key) end
     end
     for _, key in ipairs(PREVIEW_KEYS) do Baseline(key) end
 end
@@ -525,7 +616,52 @@ local function RestoreAll()
     for _, z in ipairs(ZONES) do
         for _, key in ipairs(z.live) do RestoreColor(key) end
     end
+    for _, t in ipairs(TEXT_KEYS) do RestoreColor(t.key) end
     Flush()
+end
+
+local function RGBNative(rgb)
+    return reaper.ColorToNative(rgb[1], rgb[2], rgb[3])
+end
+
+-- Every color a state paints: theme key -> native. A key that is missing
+-- keeps the theme's own color.
+local function StateColors(state)
+    local out = {}
+    for _, z in ipairs(ZONES) do
+        if z.supported and settings.paint[state][z.id] then
+            local amount = settings.tint[state][z.id] / 100
+            for _, key in ipairs(z.live) do
+                -- each area is blended over its OWN theme color, so areas
+                -- that start out lighter or darker keep their relationship
+                local base = Baseline(key)
+                if base then
+                    out[key] = Blend(base, ZoneColor(state, z.id), amount)
+                end
+            end
+        end
+    end
+
+    -- A painted ruler strip can swallow the bar numbers and the loop bar.
+    -- Push whichever is too close to it towards black or white.
+    local strip = out['col_tl_bg']
+    if not strip then return out end
+    local bright = Luma(strip) > 0.5
+
+    for _, t in ipairs(TEXT_KEYS) do
+        local fg = t.live and Baseline(t.key)
+        if fg and math.abs(Luma(fg) - Luma(strip)) < TEXT_CONTRAST then
+            out[t.key] = RGBNative(bright and t.dark or t.light)
+        end
+    end
+
+    local bar = out['col_tl_bgsel2'] or Baseline('col_tl_bgsel2')
+    if bar and math.abs(Luma(bar) - Luma(strip)) < BAR_CONTRAST then
+        local to = bright and RGBNative({ 0, 0, 0 })
+            or RGBNative({ 0xFF, 0xFF, 0xFF })
+        out['col_tl_bgsel2'] = MixNative(bar, to, BAR_PUSH)
+    end
+    return out
 end
 
 -- 'none' | 'loop' | 'rec'
@@ -540,18 +676,15 @@ local function ApplyState(state)
         RestoreAll()
         return
     end
+    local colors = StateColors(state)
+    local function Apply(key)
+        if colors[key] then ForceColor(key, colors[key]) else RestoreColor(key) end
+    end
     for _, z in ipairs(ZONES) do
-        local on = z.supported and settings.paint[state][z.id]
-        local amount = settings.tint[state][z.id] / 100
-        for _, key in ipairs(z.live) do
-            if on then
-                -- each area is blended over its OWN theme color, so areas that
-                -- start out lighter or darker keep their relationship
-                ForceColor(key, Blend(Baseline(key), palette[state], amount))
-            else
-                RestoreColor(key)
-            end
-        end
+        for _, key in ipairs(z.live) do Apply(key) end
+    end
+    for _, t in ipairs(TEXT_KEYS) do
+        if t.live then Apply(t.key) end
     end
     Flush()
 end
@@ -570,12 +703,15 @@ end
 ------------------------------------------------------------------------------
 
 local ui_open      = false
+local pop          = nil -- the open color popover
+local OpenPop, ClosePop  -- defined with the popover
 local hot          = {}
 local S            = 1
 local last_state   = nil
 local quitting     = false
 local dragging     = nil
 local mouse_down   = false
+local rmouse_down  = false
 local resized      = false
 
 -- Which state the preview shows. Validated: it is used as a table key.
@@ -623,6 +759,7 @@ end
 
 local function CloseUI()
     if not ui_open then return end
+    ClosePop()
     RememberPosition(true)
     gfx.quit()
     ui_open = false
@@ -643,8 +780,11 @@ local function SetNative(native, a)
     gfx.set(r / 255, g / 255, b / 255, a or 1)
 end
 
-local function AddHot(x, y, w, h, fn, drag)
-    hot[#hot + 1] = { x = x, y = y, w = w, h = h, fn = fn, drag = drag }
+-- rfn: right click
+local function AddHot(x, y, w, h, fn, drag, rfn)
+    local r = { x = x, y = y, w = w, h = h, fn = fn, drag = drag, rfn = rfn }
+    hot[#hot + 1] = r
+    return r
 end
 
 local function Text(x, y, str)
@@ -657,15 +797,30 @@ local function TextH()
     return h
 end
 
+-- A neutral box with a check mark, so the only colored squares in the window
+-- are colors.
+local function CheckBox(x, y, box, checked, disabled)
+    if not checked then
+        SetCol(disabled and COL_LINE or COL_BOX)
+        gfx.rect(x, y, box, box, 0)
+        return
+    end
+    SetCol(disabled and COL_DIM or COL_TEXT)
+    gfx.rect(x, y, box, box, 1)
+    SetCol(COL_BG)
+    local x1, y1 = x + box * 0.24, y + box * 0.52
+    local x2, y2 = x + box * 0.42, y + box * 0.70
+    local x3, y3 = x + box * 0.77, y + box * 0.30
+    for k = 0, math.max(1, math.floor(1.6 * S)) - 1 do
+        gfx.line(x1, y1 + k, x2, y2 + k, 1)
+        gfx.line(x2, y2 + k, x3, y3 + k, 1)
+    end
+end
+
 -- Left-aligned checkbox with a label. Returns its full width.
 local function Checkbox(x, y, label, checked, fn, disabled)
     local box = math.floor(15 * S)
-    SetCol(disabled and COL_LINE or COL_BOX)
-    gfx.rect(x, y, box, box, 0)
-    if checked then
-        if disabled then SetCol(COL_DIM) else SetHex(palette.loop) end
-        gfx.rect(x + 3 * S, y + 3 * S, box - 6 * S, box - 6 * S, 1)
-    end
+    CheckBox(x, y, box, checked, disabled)
     SetCol(disabled and COL_DIM or COL_TEXT)
     local tw, th = gfx.measurestr(label)
     Text(x + box + 9 * S, y + (box - th) / 2, label)
@@ -675,26 +830,29 @@ local function Checkbox(x, y, label, checked, fn, disabled)
     return box + 9 * S + tw
 end
 
--- One cell of the matrix: on/off box, then how strong. 100 % replaces the
--- theme color outright, anything less mixes the two.
+-- One cell of the matrix: on/off box, how strong, and the area's color. Each
+-- state is one column of those three. 100 % replaces the theme color
+-- outright, anything less mixes the two.
 local CELL_BOX  = 15
-local CELL_GAP  = 6
-local CELL_BAR  = 44
-local CELL_PCT  = 32
-local CELL_W    = CELL_BOX + CELL_GAP + CELL_BAR + CELL_GAP + CELL_PCT
+local CELL_GAP  = 8
+local CELL_BAR  = 60
+local CELL_SW   = 22
+local CELL_SWH  = 14
+local COL_SWH   = 18 -- the column's own swatch, right above the row swatches
+local CELL_W    = CELL_BOX + CELL_GAP + CELL_BAR + CELL_GAP + CELL_SW
+
+local function px1() return math.max(1, math.floor(S)) end
+
+-- The % only shows while its bar is being dragged; drawn last, over the rest.
+local drag_label = nil
 
 local function Cell(x, y, state, zone, disabled)
     local box = math.floor(CELL_BOX * S)
     local on  = settings.paint[state][zone]
     local pct = settings.tint[state][zone]
-    local hex = palette[state]
+    local hex = ZoneColor(state, zone)
 
-    SetCol(disabled and COL_LINE or COL_BOX)
-    gfx.rect(x, y, box, box, 0)
-    if on then
-        if disabled then SetCol(COL_DIM) else SetHex(hex) end
-        gfx.rect(x + 3 * S, y + 3 * S, box - 6 * S, box - 6 * S, 1)
-    end
+    CheckBox(x, y, box, on, disabled)
     if not disabled then
         AddHot(x - 3 * S, y - 4 * S, box + 6 * S, box + 8 * S, function()
             settings.paint[state][zone] = not settings.paint[state][zone]
@@ -718,10 +876,16 @@ local function Cell(x, y, state, zone, disabled)
     else
         SetCol(COL_DIM, 0.45)
     end
-    gfx.rect(bx, by, math.floor(bw * pct / 100), bh, 1)
+    local fill = math.floor(bw * pct / 100)
+    gfx.rect(bx, by, fill, bh, 1)
+
+    local id = state .. '.' .. zone
+    if dragging and dragging.cell == id then
+        drag_label = { x = bx + fill, y = by, text = pct .. '%' }
+    end
 
     if not disabled then
-        AddHot(bx - 4 * S, y - 4 * S, bw + 8 * S, box + 8 * S, nil,
+        local r = AddHot(bx - 4 * S, y - 4 * S, bw + 8 * S, box + 8 * S, nil,
             function(mx)
                 -- dragging an area you had switched off turns it on: the bar
                 -- is meaningless otherwise, and it saves a second click
@@ -735,22 +899,57 @@ local function Cell(x, y, state, zone, disabled)
                 SaveTint(state, zone)
                 last_state = nil
             end)
+        r.cell = id
     end
 
-    gfx.setfont(2, FONT, math.floor(11 * S))
-    SetCol(COL_DIM, (on and not disabled) and 1 or 0.5)
-    Text(bx + bw + math.floor(CELL_GAP * S), y + math.floor(3 * S), pct .. '%')
-    gfx.setfont(1, FONT, math.floor(FSIZE * S))
+    -- This area's own color. A dot means it no longer follows the column.
+    -- Right click puts it back.
+    if disabled then return end
+    local own = palette.row[state][zone] ~= nil
+    local sw  = math.floor(CELL_SW * S)
+    local sh  = math.floor(CELL_SWH * S)
+    local sx  = x + math.floor((CELL_W - CELL_SW) * S)
+    local sy  = y + math.floor((box - sh) / 2)
+    SetHex(hex, on and 1 or 0.35)
+    gfx.rect(sx, sy, sw, sh, 1)
+    SetCol(COL_BOX, on and 1 or 0.5)
+    gfx.rect(sx, sy, sw, sh, 0)
+    if pop and pop.owner == id then
+        SetCol(COL_TEXT)
+        gfx.rect(sx - px1(), sy - px1(), sw + 2 * px1(), sh + 2 * px1(), 0)
+    end
+    if own then
+        SetHex(palette.loop)
+        gfx.circle(sx + sw + math.floor(4 * S), sy - math.floor(2 * S),
+            math.floor(3 * S), 1, 1)
+    end
+    AddHot(sx - 3 * S, y - 4 * S, sw + 6 * S, box + 8 * S, function()
+        OpenPop(state, zone, sx, sy, sw, sh)
+        if not settings.paint[state][zone] then
+            settings.paint[state][zone] = true
+            SavePaint(state, zone)
+            last_state = nil
+        end
+    end, nil, function()
+        ClosePop()
+        gfx.x, gfx.y = gfx.mouse_x, gfx.mouse_y
+        local item = own and 'Use column color' or '#Use column color'
+        if gfx.showmenu(item) == 1 then
+            SetRowColor(state, zone, nil)
+            last_state = nil
+        end
+    end)
 end
 
-local function Swatch(cx, y, hex, fn)
-    local w, h = math.floor(40 * S), math.floor(18 * S)
-    local x = math.floor(cx - w / 2)
-    SetHex(hex)
+-- The column's color, in the swatch column of its cells
+local function Swatch(cx, y, state)
+    local w, h = math.floor(CELL_SW * S), math.floor(COL_SWH * S)
+    local x = cx + math.floor((CELL_W - CELL_SW) * S)
+    SetHex(palette[state])
     gfx.rect(x, y, w, h, 1)
-    SetCol(COL_BOX)
+    SetCol((pop and pop.owner == state) and COL_TEXT or COL_BOX)
     gfx.rect(x, y, w, h, 0)
-    AddHot(x, y, w, h, fn)
+    AddHot(x, y, w, h, function() OpenPop(state, nil, x, y, w, h) end)
     return h
 end
 
@@ -768,11 +967,6 @@ local function Pill(x, y, label, active, fn)
     return w
 end
 
-local function Centered(cx, y, label)
-    local tw = gfx.measurestr(label)
-    Text(math.floor(cx - tw / 2), y, label)
-end
-
 local function Link(x, y, label, fn)
     local tw, th = gfx.measurestr(label)
     SetCol(COL_DIM)
@@ -783,65 +977,42 @@ end
 
 -- A fake ruler + arrange, painted the way the chosen state would paint them
 local function Preview(x, y, w)
-    local mh   = math.floor(12 * S)  -- marker / region lanes: never painted
     local sh   = math.floor(6 * S)   -- time signature lane
     local rh   = math.floor(22 * S)
     local ah   = math.floor(34 * S)
     local top  = y
-    local hex  = palette[preview]
-    local on   = settings.paint[preview]
-    local tn   = settings.tint[preview]
+    local c    = StateColors(preview)
     local sel1 = math.floor(x + w * 0.26)
     local sel2 = math.floor(x + w * 0.64)
     local px   = math.max(1, math.floor(S))
 
-    -- marker / region lanes: shown for context, never repainted
-    SetNative(Baseline('marker_lane_bg') or 0x333333)
-    gfx.rect(x, y, w, mh, 1)
-    SetCol(COL_LINE)
-    gfx.rect(x, y + mh - px, w, px, 1)
-    y = y + mh
-
     -- time signature lane
-    local ts_bg = Baseline('ts_lane_bg') or 0x2E2E2E
-    if on.rulerbg then
-        SetNative(Blend(ts_bg, hex, tn.rulerbg / 100))
-    else
-        SetNative(ts_bg)
-    end
+    SetNative(c.ts_lane_bg or Baseline('ts_lane_bg') or 0x2E2E2E)
     gfx.rect(x, y, w, sh, 1)
     y = y + sh
 
     -- ruler strip
-    local ruler_bg = Baseline('col_tl_bg') or 0x2B2B2B
-    if on.rulerbg then
-        SetNative(Blend(ruler_bg, hex, tn.rulerbg / 100))
-    else
-        SetNative(ruler_bg)
-    end
+    SetNative(c.col_tl_bg or Baseline('col_tl_bg') or 0x2B2B2B)
     gfx.rect(x, y, w, rh, 1)
 
     -- ticks and bar numbers
     gfx.setfont(2, FONT, math.floor(9 * S))
+    local fg  = c.col_tl_fg or Baseline('col_tl_fg')
+    local fg2 = c.col_tl_fg2 or Baseline('col_tl_fg2') or fg
     for i = 0, 5 do
         local tx = math.floor(x + w * i / 6)
-        SetCol(COL_TEXT, 0.30)
+        if fg2 then SetNative(fg2, 0.6) else SetCol(COL_TEXT, 0.30) end
         gfx.rect(tx, y, px, math.floor(rh * 0.6), 1)
-        SetCol(COL_TEXT, 0.85)
+        if fg then SetNative(fg) else SetCol(COL_TEXT, 0.85) end
         Text(tx + math.floor(3 * S), y + px, 1 + i * 4 .. '.1')
     end
     gfx.setfont(1, FONT, math.floor(FSIZE * S))
 
     -- The loop bar at the bottom of the ruler, with its two triangular loop
     -- markers. This is `col_tl_bgsel2`, the "ruler" row.
-    local bar_off = Baseline('col_tl_bgsel2') or 0x808080
     local band = math.max(3, math.floor(rh * 0.20))
     local by = y + rh - band
-    if on.ruler then
-        SetNative(Blend(bar_off, hex, tn.ruler / 100))
-    else
-        SetNative(bar_off)
-    end
+    SetNative(c.col_tl_bgsel2 or Baseline('col_tl_bgsel2') or 0x808080)
     gfx.rect(sel1, by, sel2 - sel1, band, 1)
     local tri = band * 2
     for k = 0, tri - 1 do
@@ -861,45 +1032,288 @@ local function Preview(x, y, w)
     for i = 0, 5 do
         gfx.rect(math.floor(x + w * i / 6), y, px, ah, 1)
     end
-    local arr_off = Baseline('col_tl_bgsel') or 0x808080
-    if on.arrange then
-        SetNative(Blend(arr_off, hex, tn.arrange / 100), 0.22)
-    else
-        SetNative(arr_off, 0.22)
-    end
+    SetNative(c.col_tl_bgsel or Baseline('col_tl_bgsel') or 0x808080, 0.22)
     gfx.rect(sel1, y, sel2 - sel1, ah, 1)
 
     SetCol(COL_LINE)
-    gfx.rect(x, top, w, mh + sh + rh + ah, 0)
-    return mh + sh + rh + ah
+    gfx.rect(x, top, w, sh + rh + ah, 0)
+    return sh + rh + ah
 end
 
-local function PickColor(which)
-    -- GR_SelectColor takes only an HWND; the current color cannot be
-    -- pre-selected. pcall because it is missing on some builds.
-    local ok, ret, col = pcall(reaper.GR_SelectColor, nil)
+-- REAPER's own color picker. Returns the chosen hex, or nil when cancelled.
+local function SystemPicker(current)
+    -- pcall because it is missing on some builds
+    local ok, ret, col = pcall(reaper.GR_SelectColor, nil,
+        HexToNative(current))
     Beat()
-    if ok then
-        -- ret false means the user cancelled: do nothing, do not nag them
-        -- with a second dialog.
-        if ret and col then
-            palette[which] = NativeToHex(col)
-            SavePalette()
-            last_state = nil
-        end
-        return
+    -- Cancel returns 0, which Lua counts as true: test for it, or a cancel
+    -- paints the color black.
+    if ok and ret and ret ~= 0 and col then return NativeToHex(col) end
+    return nil
+end
+
+local function TypeHex(current)
+    local ok, csv = reaper.GetUserInputs(
+        TITLE, 1, 'Hex color (RRGGBB),extrawidth=60', current)
+    Beat()
+    if not ok then return nil end
+    local hex = csv:gsub('#', ''):gsub('%s', ''):upper()
+    if hex:match('^%x%x%x%x%x%x$') then return hex end
+    return nil
+end
+
+------------------------------------------------------------------------------
+-- Color popover: Hue / Saturation / Brightness under the clicked swatch.
+-- Every change applies at once; it is saved when the popover closes.
+------------------------------------------------------------------------------
+
+local POP_W, POP_PAD, POP_ROW, POP_VAL = 236, 12, 24, 30
+local POP_BTN_H, POP_HEX_W, POP_ARROW = 22, 76, 6
+local POP_PRESET_H, POP_PRESET_GAP = 18, 5
+local COL_POP = { 0x2E, 0x2F, 0x32 }
+
+-- Starting points across the top of the popover
+local POP_PRESETS = { 'FFC21E', 'FD7308', 'E94546', 'FF5FA2', 'B15CFF',
+    '4C7DFF', '22C7D6', '4FD16A', 'E8E8E8' }
+
+local function RGBToHSV(hex)
+    local r, g, b = HexToRGB(hex)
+    r, g, b = r / 255, g / 255, b / 255
+    local mx, mn = math.max(r, g, b), math.min(r, g, b)
+    local d, h = mx - mn, 0
+    if d > 0 then
+        if mx == r then h = ((g - b) / d) % 6
+        elseif mx == g then h = (b - r) / d + 2
+        else h = (r - g) / d + 4 end
+        h = h * 60
+    end
+    return h, mx > 0 and d / mx or 0, mx
+end
+
+-- h 0..360, s and v 0..1. Returns r, g, b 0..255.
+local function HSVToRGB(h, s, v)
+    h = h % 360
+    local c = v * s
+    local x = c * (1 - math.abs((h / 60) % 2 - 1))
+    local m = v - c
+    local r, g, b
+    if h < 60 then r, g, b = c, x, 0 elseif h < 120 then r, g, b = x, c, 0
+    elseif h < 180 then r, g, b = 0, c, x elseif h < 240 then r, g, b = 0, x, c
+    elseif h < 300 then r, g, b = x, 0, c else r, g, b = c, 0, x end
+    local function q(u) return math.floor((u + m) * 255 + 0.5) end
+    return q(r), q(g), q(b)
+end
+
+local function HSVToHex(h, s, v)
+    return string.format('%02X%02X%02X', HSVToRGB(h, s, v))
+end
+
+local function PopColor(p)
+    if p.zone then return ZoneColor(p.state, p.zone) end
+    return palette[p.state]
+end
+
+local function PopSet(p, hex, nosave)
+    if p.zone then
+        SetRowColor(p.state, p.zone, hex, nosave)
+    else
+        palette[p.state] = hex
+        if not nosave then SavePalette() end
+    end
+    last_state = nil
+end
+
+-- the H / S / V the sliders show, from a whole color. A gray keeps its hue.
+local function PopFromHex(p, hex)
+    local h, s, v = RGBToHSV(hex)
+    p.s, p.v = math.floor(s * 100 + 0.5), math.floor(v * 100 + 0.5)
+    if s > 0 and v > 0 then p.h = math.floor(h + 0.5) % 360 end
+end
+
+function ClosePop()
+    if not pop then return end
+    PopSet(pop, PopColor(pop))
+    pop = nil
+    dragging = nil -- a slider drag must not outlive its popover
+end
+
+-- A second click on the swatch that opened it closes it again.
+local closed_owner = nil
+
+function OpenPop(state, zone, x, y, w, h)
+    local owner = zone and (state .. '.' .. zone) or state
+    if closed_owner == owner then return end
+    ClosePop()
+    pop = { state = state, zone = zone, owner = owner,
+        ax = x, ay = y, aw = w, ah = h }
+    pop.orig = PopColor(pop)
+    pop.h = 0
+    PopFromHex(pop, pop.orig)
+end
+
+-- Where the popover goes: under its swatch, above it when there is no room.
+local function PopRect()
+    local p   = pop
+    local pw  = math.floor(POP_W * S)
+    local ph  = math.floor((POP_PAD * 2 + POP_PRESET_H + 10 + POP_ROW * 3 + 8 +
+        POP_BTN_H) * S)
+    local gap = math.floor((POP_ARROW + 4) * S)
+    local x = math.floor(p.ax + p.aw / 2 - pw / 2)
+    x = Clamp(x, math.floor(8 * S), gfx.w - pw - math.floor(8 * S))
+    local below = p.ay + p.ah + gap + ph <= gfx.h - math.floor(4 * S)
+    local y = below and (p.ay + p.ah + gap) or (p.ay - gap - ph)
+    y = math.max(math.floor(4 * S), y)
+    return x, y, pw, ph, below
+end
+
+local function InPop(mx, my)
+    if not pop then return false end
+    local x, y, w, h = PopRect()
+    local a = math.floor(POP_ARROW * S)
+    return mx >= x and mx <= x + w and my >= y - a and my <= y + h + a
+end
+
+local function DrawPop()
+    if not pop then return end
+    local p = pop
+    local x, y, w, h, below = PopRect()
+    local a = math.floor(POP_ARROW * S)
+
+    -- the panel swallows its own clicks
+    AddHot(x, y - a, w, h + a * 2, function() end)
+
+    SetCol(COL_POP)
+    gfx.rect(x, y, w, h, 1)
+    SetCol(COL_BOX)
+    gfx.rect(x, y, w, h, 0)
+    -- the arrow, pointing at the swatch
+    local acx = Clamp(math.floor(p.ax + p.aw / 2), x + a * 2, x + w - a * 2)
+    for k = 0, a do
+        local yy = below and (y - k) or (y + h - 1 + k)
+        SetCol(COL_POP)
+        gfx.rect(acx - (a - k), yy, (a - k) * 2 + 1, 1, 1)
+        SetCol(COL_BOX)
+        gfx.rect(acx - (a - k), yy, 1, 1, 1)
+        gfx.rect(acx + (a - k), yy, 1, 1, 1)
     end
 
-    local ok2, csv = reaper.GetUserInputs(
-        TITLE, 1, 'Hex color (RRGGBB),extrawidth=60', palette[which])
-    Beat()
-    if not ok2 then return end
-    local hex = csv:gsub('#', ''):gsub('%s', ''):upper()
-    if hex:match('^%x%x%x%x%x%x$') then
-        palette[which] = hex
-        SavePalette()
-        last_state = nil
+    gfx.setfont(2, FONT, math.floor(12 * S))
+    local pad  = math.floor(POP_PAD * S)
+    local ix   = x + pad
+    local labw = gfx.measurestr('Brightness') + math.floor(12 * S)
+    local valw = math.floor(POP_VAL * S)
+    local tx   = ix + labw
+    local tw   = x + w - pad - valw - tx
+    local th   = math.floor(5 * S)
+    local r    = math.floor(6 * S)
+    local yy   = y + pad
+    local rowh = math.floor(POP_ROW * S)
+    local fh   = TextH()
+
+    local function Apply()
+        PopSet(p, HSVToHex(p.h, p.s / 100, p.v / 100), true)
     end
+
+    -- presets: a click jumps the sliders there, ready to fine-tune
+    local now  = PopColor(p)
+    local gap  = math.floor(POP_PRESET_GAP * S)
+    local ph   = math.floor(POP_PRESET_H * S)
+    local pw   = (w - pad * 2 - gap * (#POP_PRESETS - 1)) / #POP_PRESETS
+    for i, hex in ipairs(POP_PRESETS) do
+        local px0 = math.floor(ix + (i - 1) * (pw + gap))
+        local pwi = math.floor(ix + i * (pw + gap) - gap) - px0
+        SetHex(hex)
+        gfx.rect(px0, yy, pwi, ph, 1)
+        if hex == now then
+            SetCol(COL_TEXT)
+            local o = math.floor(2 * S)
+            gfx.rect(px0 - o, yy - o, pwi + o * 2, ph + o * 2, 0)
+        end
+        AddHot(px0, yy, pwi, ph, function()
+            PopFromHex(p, hex)
+            PopSet(p, hex, true)
+        end)
+    end
+    yy = yy + ph + math.floor(10 * S)
+
+    local function Slider(label, key, max, color_at)
+        local cy = yy + math.floor(rowh / 2)
+        SetCol(COL_TEXT)
+        Text(ix, cy - fh / 2, label)
+        -- the track in the color's own gradient
+        for i = 0, tw - 1 do
+            gfx.set(color_at(i / math.max(1, tw - 1)))
+            gfx.rect(tx + i, cy - th / 2, 1, th, 1)
+        end
+        local kx = tx + math.floor(tw * p[key] / max + 0.5)
+        SetCol({ 0xC8, 0xCB, 0xD0 })
+        gfx.circle(kx, cy, r, 1, 1)
+        SetCol(COL_DIM)
+        local v = tostring(p[key])
+        Text(x + w - pad - gfx.measurestr(v), cy - fh / 2, v)
+        AddHot(tx - r, yy, tw + r * 2, rowh, nil, function(mx)
+            local v2 = math.floor(Clamp((mx - tx) / tw, 0, 1) * max + 0.5)
+            if v2 == p[key] then return end
+            p[key] = v2
+            Apply()
+        end)
+        yy = yy + rowh
+    end
+
+    local function F(r8, g8, b8) return r8 / 255, g8 / 255, b8 / 255, 1 end
+    Slider('Hue', 'h', 359, function(t) return F(HSVToRGB(t * 360, 1, 1)) end)
+    Slider('Saturation', 's', 100,
+        function(t) return F(HSVToRGB(p.h, t, p.v / 100)) end)
+    Slider('Brightness', 'v', 100,
+        function(t) return F(HSVToRGB(p.h, p.s / 100, t)) end)
+    yy = yy + math.floor(8 * S)
+
+    -- hex: click to type one
+    local bh  = math.floor(POP_BTN_H * S)
+    local hw  = math.floor(POP_HEX_W * S)
+    local cur = PopColor(p)
+    SetCol(COL_BG)
+    gfx.rect(ix, yy, hw, bh, 1)
+    SetCol(COL_BOX)
+    gfx.rect(ix, yy, hw, bh, 0)
+    SetCol(COL_TEXT)
+    local label = '#' .. cur
+    Text(ix + math.floor((hw - gfx.measurestr(label)) / 2), yy + (bh - fh) / 2,
+        label)
+    AddHot(ix, yy, hw, bh, function()
+        local hex = TypeHex(cur)
+        if hex then PopFromHex(p, hex); PopSet(p, hex, true) end
+    end)
+
+    -- a dot once it differs from where it started: click to go back
+    if cur ~= p.orig then
+        local dx = ix + hw + math.floor(9 * S)
+        local dy = yy + math.floor(bh / 2)
+        SetHex(palette.loop)
+        gfx.circle(dx, dy, math.floor(3 * S), 1, 1)
+        AddHot(dx - 6 * S, yy, 12 * S, bh, function()
+            PopFromHex(p, p.orig)
+            PopSet(p, p.orig, true)
+        end)
+    end
+
+    -- More...: REAPER's own picker
+    if reaper.GR_SelectColor then
+        local more = 'More...'
+        local mw = gfx.measurestr(more) + math.floor(20 * S)
+        local mx = x + w - pad - mw
+        SetCol(COL_PILL)
+        gfx.rect(mx, yy, mw, bh, 1)
+        SetCol(COL_BOX)
+        gfx.rect(mx, yy, mw, bh, 0)
+        SetCol(COL_TEXT)
+        Text(mx + math.floor(10 * S), yy + (bh - fh) / 2, more)
+        AddHot(mx, yy, mw, bh, function()
+            local hex = SystemPicker(cur)
+            if hex then PopFromHex(p, hex); PopSet(p, hex, true) end
+        end)
+    end
+    gfx.setfont(1, FONT, math.floor(FSIZE * S))
 end
 
 -- Reading __startup.lua every frame would be wasteful; cache it.
@@ -914,10 +1328,27 @@ local function StartupState()
     return startup_cache
 end
 
-local function ShortThemeName()
+-- "Colors for <theme>", cut to fit the room left of the columns
+local function ThemeTitle(x, y, maxw)
+    local pre = 'Colors for '
+    SetCol(COL_DIM)
+    Text(x, y, pre)
+    local nx = x + gfx.measurestr(pre)
     local name = theme_key
-    if #name > 16 then name = name:sub(1, 15) .. '\u{2026}' end
-    return name:upper()
+    while #name > 1 and gfx.measurestr(name) > maxw - (nx - x) do
+        -- drop one whole UTF-8 character: its continuation bytes, then its
+        -- lead byte
+        while #name > 1 and name:byte(-1) >= 0x80 and name:byte(-1) < 0xC0 do
+            name = name:sub(1, -2)
+        end
+        name = name:sub(1, -2)
+        if gfx.measurestr(name .. '\u{2026}') <= maxw - (nx - x) then
+            name = name .. '\u{2026}'
+            break
+        end
+    end
+    SetCol(COL_TEXT)
+    Text(nx, y, name)
 end
 
 local function DrawUI()
@@ -954,10 +1385,7 @@ local function DrawUI()
 
     local cw    = math.floor(CELL_W * S)
     local rec_x = gfx.w - pad - cw
-    local col   = { rec = rec_x, loop = rec_x - cw - math.floor(16 * S) }
-    -- headers and swatches centre over the box+bar, not over the number
-    local half  = math.floor((CELL_BOX + CELL_GAP + CELL_BAR) * S / 2)
-    local cx    = { rec = col.rec + half, loop = col.loop + half }
+    local col   = { rec = rec_x, loop = rec_x - cw - math.floor(18 * S) }
     local y = pad
 
     -- master switches
@@ -995,24 +1423,21 @@ local function DrawUI()
     gfx.rect(x, y, w, math.max(1, math.floor(S)), 1)
     y = y + math.floor(13 * S)
 
-    -- column headers + colors
-    SetCol(COL_DIM)
-    Text(x, y, ShortThemeName())
-    for _, st in ipairs(STATES) do Centered(cx[st.id], y, st.label) end
-    y = y + math.floor(20 * S)
-
-    SetCol(COL_TEXT)
-    Text(x, y + 2 * S, 'Color')
+    -- column headers: name over the bars, the column color over the swatches
+    local swh = math.floor(COL_SWH * S)
+    ThemeTitle(x, y + (swh - th) / 2, col.loop - x - math.floor(12 * S))
+    gfx.setfont(2, FONT, math.floor(12 * S))
+    local hh = TextH()
     for _, st in ipairs(STATES) do
-        Swatch(cx[st.id], y, palette[st.id], function() PickColor(st.id) end)
+        SetCol(COL_DIM)
+        Text(col[st.id] + math.floor((CELL_BOX + CELL_GAP) * S),
+            y + math.floor((swh - hh) / 2), st.label)
+        Swatch(col[st.id], y, st.id)
     end
-    y = y + math.floor(18 * S) + math.floor(16 * S)
+    gfx.setfont(1, FONT, math.floor(FSIZE * S))
+    y = y + swh + math.floor(12 * S)
 
-    -- paint matrix
-    SetCol(COL_DIM)
-    Text(x, y, 'PAINT')
-    y = y + math.floor(20 * S)
-
+    drag_label = nil
     for _, z in ipairs(ZONES) do
         SetCol(z.supported and COL_TEXT or COL_DIM)
         Text(x, y + (15 * S - th) / 2, z.label)
@@ -1024,6 +1449,7 @@ local function DrawUI()
     y = y + math.floor(10 * S)
 
     Link(x, y, 'Reset colors for this theme', function()
+        pop = nil
         ResetPalette()
         last_state = nil
     end)
@@ -1031,6 +1457,25 @@ local function DrawUI()
     Link(gfx.w - pad - gfx.measurestr(quit), y, quit, function()
         quitting = true
     end)
+
+    -- the % of the bar being dragged, in a tag above its fill
+    if drag_label then
+        gfx.setfont(2, FONT, math.floor(11 * S))
+        local tw, tth = gfx.measurestr(drag_label.text)
+        local bw2 = tw + math.floor(8 * S)
+        local bh2 = tth + math.floor(2 * S)
+        local lx = math.floor(Clamp(drag_label.x - bw2 / 2, 0, gfx.w - bw2))
+        local ly = drag_label.y - bh2 - math.floor(3 * S)
+        SetCol(COL_POP)
+        gfx.rect(lx, ly, bw2, bh2, 1)
+        SetCol(COL_BOX)
+        gfx.rect(lx, ly, bw2, bh2, 0)
+        SetCol(COL_TEXT)
+        Text(lx + math.floor(4 * S), ly + math.floor(1 * S), drag_label.text)
+        gfx.setfont(1, FONT, math.floor(FSIZE * S))
+    end
+
+    DrawPop()
 end
 
 ------------------------------------------------------------------------------
@@ -1055,6 +1500,8 @@ local function Frame()
         local file = reaper.GetLastColorThemeFile()
         if file ~= last_theme_file then
             last_theme_file = file
+            -- an open popover saves its color to the theme it was edited for
+            ClosePop()
             CaptureBaseline()
             LoadPalette()
             last_state = nil
@@ -1072,7 +1519,9 @@ local function Frame()
     if not ui_open then return end
 
     local char = gfx.getchar()
-    if char < 0 or char == 27 then
+    if char == 27 and pop then
+        ClosePop()
+    elseif char < 0 or char == 27 then
         CloseUI()
         return
     end
@@ -1082,6 +1531,13 @@ local function Frame()
 
     local down = gfx.mouse_cap & 1 == 1
     if down and not mouse_down then
+        -- a click outside the popover closes it, and still reaches what is
+        -- under it (another swatch opens the popover there)
+        closed_owner = nil
+        if pop and not InPop(gfx.mouse_x, gfx.mouse_y) then
+            closed_owner = pop.owner
+            ClosePop()
+        end
         for i = #hot, 1, -1 do
             local r = hot[i]
             if gfx.mouse_x >= r.x and gfx.mouse_x <= r.x + r.w and
@@ -1101,6 +1557,21 @@ local function Frame()
         dragging = nil
     end
     mouse_down = down
+
+    local rdown = gfx.mouse_cap & 2 == 2
+    if rdown and not rmouse_down then
+        for i = #hot, 1, -1 do
+            local r = hot[i]
+            -- the topmost area under the mouse takes it, so a right click on
+            -- the popover never reaches a swatch underneath
+            if gfx.mouse_x >= r.x and gfx.mouse_x <= r.x + r.w and
+                gfx.mouse_y >= r.y and gfx.mouse_y <= r.y + r.h then
+                if r.rfn then r.rfn() end
+                break
+            end
+        end
+    end
+    rmouse_down = rdown
     gfx.update()
 end
 
