@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Reapertips" commit="12a74f121765814b01b75472fcfa1ac74ff4fba6">
+<index version="1" name="Reapertips" commit="934aaf57a3344278d0345c7cdadc7162750ad635">
   <category name="Tuner">
     <reapack name="Reapertips_TunerBox.lua" type="script" desc="TunerBox">
       <metadata>
@@ -176,7 +176,7 @@
 {\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab The loop bar in the ruler\par}
 {\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab The time selection overlay in the arrange view\par}
 {\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab The time selection in the MIDI editor\par}
-{\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab The whole ruler strip. Marker and region lanes are left alone. Every one of those has its own intensity slider, per state: drag it down and the colour is mixed with your theme's own instead of replacing it, so you can go from a hint to full strength.\sa180\par}
+{\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab The whole ruler strip. Marker and region lanes are left alone. Every one of those has its own intensity slider, per state: drag it down and the colour is mixed with your theme's own instead of replacing it, so you can go from a hint to full strength. Each area can also have its own colour: click the small swatch at the end of its row. A dot marks the areas that have one; right click the swatch to go back to the column colour. Clicking any swatch opens a small Hue / Saturation / Brightness picker right under it, with nine preset colours on top. Changes show at once; More... opens REAPER's own picker. When the whole ruler strip is painted bright, the bar numbers turn dark on their own, and the loop bar is pushed lighter or darker so it never disappears into the strip.\sa180\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 Safety\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 Colours are changed in memory only, so your {\f1 .ReaperTheme} file is never written to. Even a crash cannot leave a permanent change: restarting REAPER puts everything back.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 Requirements\par}
@@ -200,6 +200,21 @@
       off out of the box.
 1.0 - Initial release.]]></changelog>
         <source main="main">https://github.com/Reapertips/ReaScripts/raw/ef4a59b0a3226ae7764506907441440f993832da/Utility/Reapertips_Time%20selection%20color%20for%20loop%20and%20record.lua</source>
+      </version>
+      <version name="1.2" author="Reapertips (Alejandro Hernandez)" time="2026-10-26T13:19:27Z">
+        <changelog><![CDATA[- Every area can have its own colour: click the swatch at the end of its
+  row. A dot marks the areas that have one; right click the swatch to
+  follow the column colour again.
+- Colours are picked in a small Hue / Saturation / Brightness popover
+  under the swatch, with nine preset colours and live changes. REAPER's
+  picker is one click away under More...
+- Cleaner settings window: plain check marks, one column per state
+  (check, bar, swatch), and the % only shows while you drag.
+- The bar numbers turn dark when the painted ruler strip is bright, so
+  they stay readable at any colour.
+- The loop bar no longer disappears when the ruler strip is painted in
+  the same colour: it is pushed lighter or darker automatically.]]></changelog>
+        <source main="main">https://github.com/Reapertips/ReaScripts/raw/934aaf57a3344278d0345c7cdadc7162750ad635/Utility/Reapertips_Time%20selection%20color%20for%20loop%20and%20record.lua</source>
       </version>
     </reapack>
   </category>
