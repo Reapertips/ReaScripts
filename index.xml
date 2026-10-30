@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Reapertips" commit="934aaf57a3344278d0345c7cdadc7162750ad635">
+<index version="1" name="Reapertips" commit="e8110c409a06bfed5b544aae4eef2346e3940343">
   <category name="Tuner">
     <reapack name="Reapertips_TunerBox.lua" type="script" desc="TunerBox">
       <metadata>
@@ -92,7 +92,7 @@
 {\pard \ql \f0 \sa180 \li0 \fi0 Project Launcher can open with REAPER and stay hidden when another project is already open.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 Shortcuts\par}
 {\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab {\f1 Enter} opens the selected project.\par}
-{\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab {\f1 Ctrl/Cmd} + {\f1 Enter} opens it in a new tab.\par}
+{\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab {\f1 Ctrl/Cmd} + {\f1 Enter} opens it in a new tab. If {\f1 Settings} > {\f1 Open projects in} is set to {\f1 New tab}, it opens in the current tab instead.\par}
 {\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab {\f1 Alt/Option} + {\f1 Enter} opens it as a new version.\par}
 {\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab {\f1 Ctrl/Cmd} + {\f1 F} jumps to search.\par}
 {\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab {\f1 Esc} clears the search or closes the window.\sa180\par}
@@ -125,6 +125,16 @@
       <version name="1.0.2" author="Reapertips (Alejandro Hernandez)" time="2026-10-03T17:45:51Z">
         <changelog><![CDATA[- Show the time next to the date in the `Modified` column. Turn it on in `Settings` > `General`.]]></changelog>
         <source main="main">https://github.com/Reapertips/ReaScripts/raw/481e204aef440abf2863212ca20731ecea3fcc7d/Utility/Reapertips_Project%20Launcher.lua</source>
+      </version>
+      <version name="1.1.0" author="Reapertips (Alejandro Hernandez)" time="2026-10-30T01:23:18Z">
+        <changelog><![CDATA[- Light theme. Pick `Dark`, `Light` or `Match REAPER` in `Settings` > `General` > `Appearance`.
+- New right-click options for projects: `Open with FX offline`, `Bring FX online after load` and `Open read-only`.
+- `Bring FX online after load` keeps offline any FX that was already offline in the project.
+- The sample rate is hidden when the project does not set its own.
+- Open projects in a new tab by default: `Settings` > `General` > `Open projects in`. `Cmd/Ctrl` + `Enter` then opens in the current tab.
+- With `New tab`, an empty project nobody touched (like the one REAPER starts with) is reused instead of left behind.
+- Shorter `Settings` window.]]></changelog>
+        <source main="main">https://github.com/Reapertips/ReaScripts/raw/e8110c409a06bfed5b544aae4eef2346e3940343/Utility/Reapertips_Project%20Launcher.lua</source>
       </version>
     </reapack>
     <reapack name="Reapertips_Speed Trainer.lua" type="script" desc="Speed Trainer">
