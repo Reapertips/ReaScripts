@@ -1,10 +1,16 @@
 --[[
   @description Project Launcher
   @author Reapertips (Alejandro Hernandez)
-  @version 1.0.2
+  @version 1.1.0
   @license MIT
   @changelog
-    - Show the time next to the date in the `Modified` column. Turn it on in `Settings` > `General`.
+    - Light theme. Pick `Dark`, `Light` or `Match REAPER` in `Settings` > `General` > `Appearance`.
+    - New right-click options for projects: `Open with FX offline`, `Bring FX online after load` and `Open read-only`.
+    - `Bring FX online after load` keeps offline any FX that was already offline in the project.
+    - The sample rate is hidden when the project does not set its own.
+    - Open projects in a new tab by default: `Settings` > `General` > `Open projects in`. `Cmd/Ctrl` + `Enter` then opens in the current tab.
+    - With `New tab`, an empty project nobody touched (like the one REAPER starts with) is reused instead of left behind.
+    - Shorter `Settings` window.
   @link
     Reapertips https://www.reapertips.com
   @about
@@ -34,7 +40,8 @@
     ## Shortcuts
 
     - `Enter` opens the selected project.
-    - `Ctrl/Cmd` + `Enter` opens it in a new tab.
+    - `Ctrl/Cmd` + `Enter` opens it in a new tab. If `Settings` > `Open
+      projects in` is set to `New tab`, it opens in the current tab instead.
     - `Alt/Option` + `Enter` opens it as a new version.
     - `Ctrl/Cmd` + `F` jumps to search.
     - `Esc` clears the search or closes the window.
@@ -85,7 +92,7 @@
 
 local SB = {
     NAME    = 'Project Launcher',
-    VERSION = '1.0.2',
+    VERSION = '1.1.0',
     EXTNAME = 'RTIPS.ProjectLauncher',
     OLD_EXTNAME = 'RTIPS.StartBox',
 }
@@ -131,6 +138,7 @@ local API_NAMES = {
     'Combo', 'AlignTextToFramePadding', 'NewLine', 'SetNextWindowPos',
     'CalcTextSize', 'Checkbox', 'ChildFlags_AlwaysUseWindowPadding',
     'CloseCurrentPopup', 'ColorEdit3', 'ColorEditFlags_NoInputs',
+    'ColorEditFlags_NoTooltip',
     'Col_Border', 'Col_Button', 'Col_ButtonActive',
     'Col_ButtonHovered', 'Col_CheckMark', 'Col_ChildBg', 'Col_FrameBg',
     'Col_FrameBgActive', 'Col_FrameBgHovered', 'Col_Header',
@@ -506,9 +514,11 @@ function SB.cfg_load()
     SB.cfg.hide_missing  = get_bool('hide_missing', true)
     SB.cfg.keep_open     = get_bool('keep_open', false)
     SB.cfg.show_time     = get_bool('show_time', false)
+    SB.cfg.look          = get_ext('look', 'dark')
     SB.cfg.skip_if_open  = get_bool('skip_if_open', true)
     SB.cfg.view          = get_ext('view', 'recent')
     SB.cfg.open_on       = get_ext('open_on', 'last')
+    SB.cfg.open_in       = get_ext('open_in', 'current')
     SB.cfg.sections      = SB.list_decode(get_ext('sections', ''))
     SB.cfg.filed         = SB.map_decode(get_ext('filed', ''))
     SB.cfg.used          = SB.map_decode(get_ext('used', ''))
@@ -760,6 +770,14 @@ local CASE_FOLD = IS_WIN or IS_MAC
 
 function SB.path_key(path)
     return CASE_FOLD and path:lower() or path
+end
+
+-- Same file, even if one side came back with the other slash on Windows.
+function SB.same_path(a, b)
+    if IS_WIN then
+        a, b = a:gsub('/', '\\'), b:gsub('/', '\\')
+    end
+    return SB.path_key(a) == SB.path_key(b)
 end
 
 function SB.read_file(path, max_bytes)
@@ -1065,8 +1083,11 @@ function SB.parse_rpp(path, max_lines)
             end
         end
         if not meta.srate then
-            local sr = line:match('^%s*SAMPLERATE%s+(%d+)')
-            if sr then meta.srate = tonumber(sr) end
+            -- The second field is the "Project sample rate" checkbox. When
+            -- it is off the project follows the audio device, and the stored
+            -- rate is just a leftover default: show nothing rather than it.
+            local sr, use = line:match('^%s*SAMPLERATE%s+(%d+)%s+(%d+)')
+            if sr then meta.srate = use ~= '0' and tonumber(sr) or false end
         end
         if line:match('^%s*<TRACK') then
             meta.tracks = meta.tracks + 1
@@ -1236,6 +1257,164 @@ local CMD_SAVE_NEW_VERSION    = 41895 -- Save new version of project
 local CMD_NEW_PROJECT         = 40023
 local CMD_OPEN_PROJECT        = 40025
 
+-- GUIDs of the FX the .rpp saved as online. Each FX is a BYPASS line
+-- (bypass, offline, ...) before its plug-in block and an FXID line after
+-- it, at the same block depth, so containers pair up their own children.
+function SB.rpp_online_fx(path)
+    local f = io.open(path, 'rb')
+    if not f then return nil end
+    local online, pending, depth = {}, {}, 0
+    local ok = pcall(function()
+        for line in f:lines() do
+            local s = line:match('^%s*(.-)%s*$')
+            if s:sub(1, 1) == '<' then
+                depth = depth + 1
+            elseif s == '>' then
+                pending[depth] = nil
+                depth = depth - 1
+            else
+                local off = s:match('^BYPASS%s+%S+%s+(%S+)')
+                if off then
+                    pending[depth] = off == '0'
+                else
+                    local guid = s:match('^FXID%s+(%b{})')
+                    if guid then
+                        if pending[depth] then online[guid:upper()] = true end
+                        pending[depth] = nil
+                    end
+                end
+            end
+        end
+    end)
+    f:close()
+    return ok and online or nil
+end
+
+-- Lists every FX in `proj` whose GUID is in `online`, in REAPER's order
+-- (master, tracks, input FX, takes). Anything not listed (offline in the
+-- .rpp, or not in the .rpp at all, like monitoring FX) is left alone.
+-- Nothing is loaded here: SB.fx_online_step brings one online per frame,
+-- the way REAPER's own "Bring FX online after load" does.
+-- Calls fn(idx, guid) for every FX of a track (chain, then input FX at
+-- 0x1000000 + i) or a take, container children included. A true return
+-- from fn stops the walk and is passed back.
+local function walk_fx(obj, is_take, fn)
+    local api = is_take and 'TakeFX_' or 'TrackFX_'
+    local function visit(idx)
+        if fn(idx, reaper[api .. 'GetFXGUID'](obj, idx)) then return true end
+        local _, n = reaper[api .. 'GetNamedConfigParm'](obj, idx,
+            'container_count')
+        for j = 0, (tonumber(n) or 0) - 1 do
+            local _, child = reaper[api .. 'GetNamedConfigParm'](obj, idx,
+                'container_item.' .. j)
+            if tonumber(child) and visit(tonumber(child)) then return true end
+        end
+    end
+    local function chain(count, base)
+        for i = 0, count - 1 do
+            if visit(base + i) then return true end
+        end
+    end
+    if is_take then return chain(reaper.TakeFX_GetCount(obj), 0) end
+    return chain(reaper.TrackFX_GetCount(obj), 0)
+        or chain(reaper.TrackFX_GetRecCount(obj), 0x1000000)
+end
+
+function SB.fx_online_job(online, proj)
+    local list = {}
+    local function add(obj, is_take)
+        local api = is_take and 'TakeFX_' or 'TrackFX_'
+        walk_fx(obj, is_take, function(idx, g)
+            -- Only what this load left offline: after a cancelled save
+            -- prompt nothing is, and nothing gets touched.
+            if g and online[g:upper()]
+                    and reaper[api .. 'GetOffline'](obj, idx) then
+                list[#list + 1] = { proj = proj, obj = obj, take = is_take,
+                    idx = idx, guid = g:upper() }
+            end
+        end)
+    end
+
+    add(reaper.GetMasterTrack(proj), false)
+    for t = 0, reaper.CountTracks(proj) - 1 do
+        add(reaper.GetTrack(proj, t), false)
+    end
+    for it = 0, reaper.CountMediaItems(proj) - 1 do
+        local item = reaper.GetMediaItem(proj, it)
+        for k = 0, reaper.CountTakes(item) - 1 do
+            local take = reaper.GetTake(item, k)
+            if take then add(take, true) end
+        end
+    end
+    if #list == 0 then return nil end
+    return { list = list, i = 0, name = '' }
+end
+
+-- A second "Bring FX online" open while one is still running joins the
+-- queue instead of dropping what was left of the first.
+function SB.fx_online_add(job)
+    if not job then return end
+    if not SB.fx_job then SB.fx_job = job return end
+    for _, fx in ipairs(job.list) do
+        SB.fx_job.list[#SB.fx_job.list + 1] = fx
+    end
+end
+
+-- Brings the next FX of `job` online. Returns true once there is nothing
+-- left. A closed project or a deleted track or take is skipped rather than
+-- touched, and an FX that moved in its chain since the job was built is
+-- found again by its GUID, so the index never hits a different plug-in.
+function SB.fx_online_step(job)
+    if job.i >= #job.list then return true end
+    job.i = job.i + 1
+    local fx = job.list[job.i]
+    local api = fx.take and 'TakeFX_' or 'TrackFX_'
+    local kind = fx.take and 'MediaItem_Take*' or 'MediaTrack*'
+    if reaper.ValidatePtr(fx.proj, 'ReaProject*')
+            and reaper.ValidatePtr2(fx.proj, fx.obj, kind) then
+        local idx = fx.idx
+        local g = reaper[api .. 'GetFXGUID'](fx.obj, idx)
+        if not g or g:upper() ~= fx.guid then
+            idx = nil
+            walk_fx(fx.obj, fx.take, function(i, guid)
+                if guid and guid:upper() == fx.guid then idx = i return true end
+            end)
+        end
+        if idx then
+            local _, name = reaper[api .. 'GetFXName'](fx.obj, idx)
+            job.name = name or ''
+            reaper[api .. 'SetOffline'](fx.obj, idx, false)
+        end
+    end
+    return job.i >= #job.list
+end
+
+-- Brings everything left online at once. Used when the script is stopped
+-- mid-job (the toolbar button clicked again), so no FX is left offline
+-- without the user asking for it.
+function SB.fx_online_finish()
+    local job = SB.fx_job
+    SB.fx_job = nil
+    if not job then return end
+    reaper.PreventUIRefresh(1)
+    while not SB.fx_online_step(job) do end
+    reaper.PreventUIRefresh(-1)
+end
+
+-- The open that Enter, double-click and the big button do, and the one
+-- Cmd+Enter does. Settings decides which of the two is the default.
+function SB.main_open() return SB.cfg.open_in == 'tab' and 'tab' or 'current' end
+function SB.alt_open() return SB.cfg.open_in == 'tab' and 'current' or 'tab' end
+
+-- A tab nobody has used: never saved, no changes, no tracks. REAPER starts
+-- with one, and with New tab as the default it would be left behind next to
+-- every project opened from here.
+function SB.current_tab_empty()
+    local proj, path = reaper.EnumProjects(-1)
+    if not proj or (path or '') ~= '' then return false end
+    return reaper.IsProjectDirty(proj) == 0 and reaper.CountTracks(proj) == 0
+end
+
 function SB.open(item, mode)
     if not item then return end
     if item.missing then
@@ -1249,14 +1428,53 @@ function SB.open(item, mode)
         return true
     end
 
-    if mode == 'tab' or mode == 'copy' then
+    -- With New tab as the default, the special opens follow it too.
+    local default_tab = SB.cfg.open_in == 'tab'
+    local new_tab = mode == 'tab' or mode == 'copy' or (default_tab
+        and mode ~= 'current')
+    if new_tab and not (default_tab and SB.current_tab_empty()) then
         reaper.Main_OnCommand(CMD_NEW_TAB_NO_TEMPLATE, 0)
     end
 
+    local online
+    -- Reopening the open project with unsaved changes asks to save first.
+    -- A real load comes back clean; still dirty means the prompt was
+    -- cancelled, and read-only must not lock that unsaved session.
+    local _, cur = reaper.EnumProjects(-1)
+    local was_dirty = cur and SB.same_path(cur, item.path)
+        and reaper.IsProjectDirty(0) == 1
+
     if item.kind == 'template' and mode ~= 'edit' then
         reaper.Main_openProject('template:' .. item.path)
+    elseif mode == 'offline' then
+        -- REAPER's own recovery mode: every FX loads offline, so a plug-in
+        -- that crashes on load can be found and removed.
+        reaper.Main_openProject('fxoffline:' .. item.path)
+    elseif mode == 'online' then
+        -- No open prefix either: load with FX offline, then bring back the
+        -- ones the .rpp had online. Read the file first so a failed read
+        -- falls back to a plain open instead of leaving everything offline.
+        online = SB.rpp_online_fx(item.path)
+        reaper.Main_openProject((online and 'fxoffline:' or '') .. item.path)
     else
         reaper.Main_openProject(item.path)
+    end
+
+    -- Read-only has no open prefix. Flag the project once it is loaded, the
+    -- same state the Open dialog's "Open as read-only" leaves behind, but
+    -- only if the project that loaded is the one asked for: a cancelled
+    -- save prompt must not lock whatever was open before.
+    if (mode == 'readonly' and reaper.GetSetProjectInfo) or online then
+        local proj, now = reaper.EnumProjects(-1)
+        if now and SB.same_path(now, item.path)
+                and not (mode == 'readonly' and was_dirty
+                    and reaper.IsProjectDirty(0) == 1) then
+            if online then
+                SB.fx_online_add(SB.fx_online_job(online, proj))
+            else
+                reaper.GetSetProjectInfo(0, 'READONLY', 1, true)
+            end
+        end
     end
 
     if mode == 'copy' then
@@ -1565,33 +1783,83 @@ local MOD_CMD = IS_MAC and ImGui.Mod_Super or ImGui.Mod_Ctrl
 
 local C = {}
 
+SB.LOOKS = { 'dark', 'light', 'match' }
+SB.LOOK_LABEL = 'Dark\0Light\0Match REAPER\0'
+
+-- 'match' reads the REAPER theme's own window background, so a light theme
+-- gets a light launcher without anyone opening Settings.
+function SB.is_light()
+    local look = SB.cfg.look
+    if look == 'light' then return true end
+    if look ~= 'match' or not reaper.GetThemeColor then return false end
+    local native = reaper.GetThemeColor('col_main_bg2', 0)
+    if not native or native < 0 then return false end
+    local r, g, b = reaper.ColorFromNative(native)
+    return 0.299 * r + 0.587 * g + 0.114 * b > 140
+end
+
+-- An accent picked for a dark background is too pale to read as text on a
+-- light one. Step it darker until it is, keeping the hue.
+function SB.ink_accent(rgb)
+    local r, g, b = (rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF
+    for _ = 1, 12 do
+        if 0.299 * r + 0.587 * g + 0.114 * b <= 110 then break end
+        r, g, b = math.floor(r * 0.9), math.floor(g * 0.9), math.floor(b * 0.9)
+    end
+    return (r << 16) | (g << 8) | b
+end
+
 function SB.build_palette()
     SB.style_dirty = true
     SB.theme = SB.theme_key()
     local a, source = SB.accent_for_theme(SB.theme)
     SB.accent_rgb = a
     SB.accent_source = source
-    -- Values below are the approved mockup, one for one.
-    C.accent      = rgba(a)
-    C.accent_dim  = rgba(a, 0x29)   -- selected row / primary button, 16%
-    C.accent_soft = rgba(a, 0x3D)
-    C.text        = rgba(0xD2D4DA)
-    C.text_bright = rgba(0xEFF1F4)
-    C.text_dim    = rgba(0x9A9CA4)
-    C.text_faint  = rgba(0x7C7E86)
-    C.win         = rgba(0x232326)   -- one surface: window, rail, list, detail
-    C.child       = rgba(0x232326)
-    C.line        = rgba(0x33333A)
-    C.frame       = rgba(0xFFFFFF, 0x0D)   -- search field, 5% white
-    C.frame_hover = rgba(0xFFFFFF, 0x14)
-    C.button      = rgba(0xFFFFFF, 0x0F)   -- 6% white
-    C.button_hov  = rgba(0xFFFFFF, 0x18)
-    C.tab_on      = rgba(0xFFFFFF, 0x12)   -- 7% white
-    C.ghost       = rgba(0xFFFFFF, 0x2E)   -- only while dragging a column edge
-    C.dim_bg      = rgba(0x000000, 0x88)
-    C.row_hover   = rgba(0xFFFFFF, 0x0C)
+    SB.light = SB.is_light()
+    if SB.light then
+        -- Same structure as dark, washes in black instead of white.
+        SB.ink = 0x000000
+        C.accent      = rgba(SB.ink_accent(a))
+        C.accent_dim  = rgba(a, 0x33)
+        C.accent_soft = rgba(a, 0x4D)
+        C.text        = rgba(0x2B2C31)
+        C.text_bright = rgba(0x111215)
+        C.text_dim    = rgba(0x5E6069)
+        C.text_faint  = rgba(0x8A8C94)
+        C.win         = rgba(0xF3F3F5)
+        C.child       = rgba(0xF3F3F5)
+        C.popup       = rgba(0xFFFFFF)
+        C.line        = rgba(0xDCDCE2)
+        C.border      = rgba(0x000000, 0x30)
+        C.dim_bg      = rgba(0x1E1E23, 0x40)
+        C.warn        = rgba(0xC23B3B)
+    else
+        -- Values below are the approved mockup, one for one.
+        SB.ink = 0xFFFFFF
+        C.accent      = rgba(a)
+        C.accent_dim  = rgba(a, 0x29)   -- selected row / primary button, 16%
+        C.accent_soft = rgba(a, 0x3D)
+        C.text        = rgba(0xD2D4DA)
+        C.text_bright = rgba(0xEFF1F4)
+        C.text_dim    = rgba(0x9A9CA4)
+        C.text_faint  = rgba(0x7C7E86)
+        C.win         = rgba(0x232326)   -- one surface: window, rail, list, detail
+        C.child       = rgba(0x232326)
+        C.popup       = rgba(0x232326)
+        C.line        = rgba(0x33333A)
+        C.border      = rgba(0x000000, 0x8C)
+        C.dim_bg      = rgba(0x000000, 0x88)
+        C.warn        = rgba(0xFF8A8A)
+    end
+    local ink = SB.ink
+    C.frame       = rgba(ink, 0x0D)   -- search field, 5%
+    C.frame_hover = rgba(ink, 0x14)
+    C.button      = rgba(ink, 0x0F)   -- 6%
+    C.button_hov  = rgba(ink, 0x18)
+    C.tab_on      = rgba(ink, 0x12)   -- 7%
+    C.ghost       = rgba(ink, 0x2E)   -- only while dragging a column edge
+    C.row_hover   = rgba(ink, 0x0C)
     C.clear       = rgba(0x000000, 0x00)
-    C.warn        = rgba(0xFF8A8A)
 end
 
 ------------------------------------------------------------------------------
@@ -1723,6 +1991,14 @@ local function move_sel(delta)
     S.scroll_to = true
 end
 
+-- Menu and button words for the default open and the other one.
+local function open_labels()
+    if SB.cfg.open_in == 'tab' then
+        return 'Open in new tab', 'Open in current tab'
+    end
+    return 'Open', 'Open in new tab'
+end
+
 local function do_open(mode)
     local item = selected()
     if not item then return end
@@ -1759,17 +2035,17 @@ local function draw_surface()
     local ww = ImGui.GetWindowSize(ctx)
     local r = PX(12)
     ImGui.DrawList_AddLine(dl, wx + r, wy + 0.5, wx + ww - r, wy + 0.5,
-        rgba(0xFFFFFF, 0x12), 1)
+        rgba(SB.ink, SB.light and 0x00 or 0x12), 1)
 end
 
 local function build_style()
     STYLE_C = {
         { ImGui.Col_WindowBg,        C.win },
         { ImGui.Col_ChildBg,         C.child },
-        { ImGui.Col_PopupBg,         C.child },
+        { ImGui.Col_PopupBg,         C.popup },
         { ImGui.Col_Text,            C.text },
         { ImGui.Col_TextDisabled,    C.text_dim },
-        { ImGui.Col_Border,          rgba(0x000000, 0x8C) },
+        { ImGui.Col_Border,          C.border },
         { ImGui.Col_FrameBg,         C.frame },
         { ImGui.Col_FrameBgHovered,  C.frame_hover },
         { ImGui.Col_FrameBgActive,   C.frame_hover },
@@ -1788,15 +2064,17 @@ local function build_style()
         { ImGui.Col_TableHeaderBg,     C.clear },
         { ImGui.Col_TableBorderLight,  C.clear },
         { ImGui.Col_TableBorderStrong, C.clear },
-        { ImGui.Col_ModalWindowDimBg,  C.dim_bg },
+        -- ImGui dims with a square rect over the whole viewport, which pokes
+        -- out past the rounded corners. settings_popup paints its own.
+        { ImGui.Col_ModalWindowDimBg,  C.clear },
         { ImGui.Col_CheckMark,       C.accent },
         { ImGui.Col_TitleBgActive,   C.child },
-        { ImGui.Col_ScrollbarGrab,   rgba(0xFFFFFF, 0x1A) },
-        { ImGui.Col_ScrollbarGrabHovered, rgba(0xFFFFFF, 0x2A) },
+        { ImGui.Col_ScrollbarGrab,   rgba(SB.ink, 0x1A) },
+        { ImGui.Col_ScrollbarGrabHovered, rgba(SB.ink, 0x2A) },
         { ImGui.Col_ScrollbarBg,     C.clear },
         -- Back on the real corner of the window, where it can be grabbed.
-        { ImGui.Col_ResizeGrip,        rgba(0xFFFFFF, 0x16) },
-        { ImGui.Col_ResizeGripHovered, rgba(0xFFFFFF, 0x2E) },
+        { ImGui.Col_ResizeGrip,        rgba(SB.ink, 0x16) },
+        { ImGui.Col_ResizeGripHovered, rgba(SB.ink, 0x2E) },
         { ImGui.Col_ResizeGripActive,  C.accent_soft },
     }
     STYLE_V = {
@@ -2418,8 +2696,10 @@ local function draw_rail(height)
         -- The shortcuts, pinned to the bottom of whatever room is left.
         ImGui.PushFont(ctx, nil, FS(11))
         local lines = {
-            'Enter  ' .. (S.query ~= '' and 'open top match' or 'open'),
-            SHORTCUT .. 'Enter  new tab',
+            'Enter  ' .. (S.query ~= '' and 'open top match'
+                or SB.main_open() == 'tab' and 'new tab' or 'open'),
+            SHORTCUT .. 'Enter  '
+                .. (SB.alt_open() == 'tab' and 'new tab' or 'current tab'),
             SHORTCUT .. 'F  search',
             SHORTCUT .. 'D  favorite',
             'Esc  ' .. (S.query ~= '' and 'clear search' or 'close'),
@@ -2589,11 +2869,11 @@ local function draw_list(width, height)
         local alpha = SB.scroll_alpha(SB.scroll_state, reaper.time_precise(),
             S.list_scroll or 0, near)
         ImGui.PushStyleColor(ctx, ImGui.Col_ScrollbarGrab,
-            fade(rgba(0xFFFFFF, 0x24), alpha))
+            fade(rgba(SB.ink, 0x24), alpha))
         ImGui.PushStyleColor(ctx, ImGui.Col_ScrollbarGrabHovered,
-            fade(rgba(0xFFFFFF, 0x38), alpha))
+            fade(rgba(SB.ink, 0x38), alpha))
         ImGui.PushStyleColor(ctx, ImGui.Col_ScrollbarGrabActive,
-            fade(rgba(0xFFFFFF, 0x4C), alpha))
+            fade(rgba(SB.ink, 0x4C), alpha))
 
         local flags = ImGui.TableFlags_ScrollY |
             ImGui.TableFlags_SizingStretchProp | ImGui.TableFlags_Resizable |
@@ -2734,7 +3014,7 @@ local function draw_list(width, height)
                                 set_sel(i)
                                 if ImGui.IsMouseDoubleClicked(ctx, 0) then
                                     do_open(ImGui.GetKeyMods(ctx) & MOD_CMD ~= 0
-                                        and 'tab' or 'current')
+                                        and SB.alt_open() or SB.main_open())
                                 end
                             end
                         end
@@ -2756,11 +3036,26 @@ local function draw_list(width, height)
                         push_menu_style()
                         if ImGui.BeginPopupContextItem(ctx) then
                             set_sel(i)
-                            if ImGui.MenuItem(ctx, 'Open') then do_open('current') end
-                            if ImGui.MenuItem(ctx, 'Open in new tab') then do_open('tab') end
+                            local main_label, alt_label = open_labels()
+                            if ImGui.MenuItem(ctx, main_label) then
+                                do_open(SB.main_open())
+                            end
+                            if ImGui.MenuItem(ctx, alt_label) then
+                                do_open(SB.alt_open())
+                            end
                             if item.kind == 'project' then
                                 if ImGui.MenuItem(ctx, 'Open as new version') then
                                     do_open('copy')
+                                end
+                                ImGui.Separator(ctx)
+                                if ImGui.MenuItem(ctx, 'Open with FX offline') then
+                                    do_open('offline')
+                                end
+                                if ImGui.MenuItem(ctx, 'Bring FX online after load') then
+                                    do_open('online')
+                                end
+                                if ImGui.MenuItem(ctx, 'Open read-only') then
+                                    do_open('readonly')
                                 end
                             elseif item.kind == 'template' then
                                 if ImGui.MenuItem(ctx, 'Edit template file') then
@@ -3057,8 +3352,9 @@ local function draw_detail(width, height)
         ImGui.PushStyleColor(ctx, ImGui.Col_Button, C.accent_dim)
         ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, C.accent_soft)
         ImGui.PushStyleColor(ctx, ImGui.Col_Text, C.accent)
-        if ImGui.Button(ctx, 'Open', -1) then do_open('current') end
-        hint('Opens it. Enter')
+        local main_label, alt_label = open_labels()
+        if ImGui.Button(ctx, main_label, -1) then do_open(SB.main_open()) end
+        hint('Enter')
         ImGui.PopStyleColor(ctx, 3)
 
         if tpl then
@@ -3066,8 +3362,9 @@ local function draw_detail(width, height)
             -- the height a second and third full row would cost.
             local gap_x = ImGui.GetStyleVar(ctx, ImGui.StyleVar_ItemSpacing)
             local third = (ImGui.GetContentRegionAvail(ctx) - gap_x * 2) / 3
-            if ImGui.Button(ctx, 'New tab', third) then do_open('tab') end
-            hint('Opens it in a new tab. ' .. SHORTCUT .. 'Enter')
+            local short = SB.alt_open() == 'tab' and 'New tab' or 'This tab'
+            if ImGui.Button(ctx, short, third) then do_open(SB.alt_open()) end
+            hint(alt_label .. '. ' .. SHORTCUT .. 'Enter')
             ImGui.SameLine(ctx)
             if ImGui.Button(ctx, 'Edit', third) then do_open('edit') end
             hint('Opens the template file itself, to change it')
@@ -3075,7 +3372,7 @@ local function draw_detail(width, height)
             if ImGui.Button(ctx, 'Folder', third) then SB.reveal(item.path) end
             hint('Shows the file in Finder')
         else
-            if ImGui.Button(ctx, 'Open in new tab', -1) then do_open('tab') end
+            if ImGui.Button(ctx, alt_label, -1) then do_open(SB.alt_open()) end
             hint(SHORTCUT .. 'Enter')
             if item.kind == 'project' then
                 if ImGui.Button(ctx, 'Open as new version', -1) then
@@ -3264,11 +3561,10 @@ local function settings_general()
         end
     end
 
-    ImGui.Dummy(ctx, 1, PX(10))
-    ImGui.Separator(ctx)
     ImGui.Dummy(ctx, 1, PX(4))
-    ImGui.TextColored(ctx, C.text_faint, 'WHEN IT OPENS')
+    ImGui.Separator(ctx)
     ImGui.Dummy(ctx, 1, PX(2))
+    ImGui.TextColored(ctx, C.text_faint, 'LAUNCHER')
 
     local at = 1
     for i, key in ipairs(SB.OPEN_ON) do
@@ -3283,7 +3579,37 @@ local function settings_general()
     end
     hint('Which tab is showing when the window opens')
 
-    ImGui.Dummy(ctx, 1, PX(2))
+    -- Two words, both always visible: a dropdown would hide the other one.
+    local pad_x = ImGui.GetStyleVar(ctx, ImGui.StyleVar_FramePadding)
+    local gap_x = ImGui.GetStyleVar(ctx, ImGui.StyleVar_ItemSpacing)
+    local seg = { { 'current', 'Current tab' }, { 'tab', 'New tab' } }
+    local seg_w = gap_x
+    for _, s in ipairs(seg) do
+        s[3] = ImGui.CalcTextSize(ctx, s[2]) + pad_x * 2
+        seg_w = seg_w + s[3]
+    end
+    setting_row('Open projects in', seg_w)
+    for n, s in ipairs(seg) do
+        if n > 1 then ImGui.SameLine(ctx) end
+        local on = SB.main_open() == s[1]
+        ImGui.PushStyleColor(ctx, ImGui.Col_Button, on and C.tab_on or C.clear)
+        ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered,
+            on and C.tab_on or C.button)
+        ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, C.button_hov)
+        ImGui.PushStyleColor(ctx, ImGui.Col_Text,
+            on and C.accent or C.text_dim)
+        if ImGui.Button(ctx, s[2], s[3]) then
+            SB.cfg.open_in = s[1]
+            set_ext('open_in', s[1])
+        end
+        ImGui.PopStyleColor(ctx, 4)
+        hint(s[1] == 'tab'
+            and 'Enter opens in a new tab, ' .. SHORTCUT
+                .. 'Enter in the current one'
+            or 'Enter opens in the current tab, ' .. SHORTCUT
+                .. 'Enter in a new one')
+    end
+
     local rvk, keep = ImGui.Checkbox(ctx,
         'Keep the window open after opening a project', SB.cfg.keep_open)
     if rvk then
@@ -3292,37 +3618,55 @@ local function settings_general()
     end
     hint('Off means it closes as soon as a project opens')
 
-    ImGui.Dummy(ctx, 1, PX(10))
-    ImGui.Separator(ctx)
     ImGui.Dummy(ctx, 1, PX(4))
-    ImGui.TextColored(ctx, C.text_faint, 'APPEARANCE')
+    ImGui.Separator(ctx)
     ImGui.Dummy(ctx, 1, PX(2))
+    ImGui.TextColored(ctx, C.text_faint, 'APPEARANCE')
 
-    setting_row('Accent', PX(24))
-    local rva, picked = ImGui.ColorEdit3(ctx, '##accent',
-        SB.accent_rgb or 0, ImGui.ColorEditFlags_NoInputs)
-    if rva then
-        SB.set_accent_override(SB.theme, picked)
-        SB.build_palette()
-    end
-    ImGui.SameLine(ctx)
-    ImGui.TextColored(ctx, C.text_faint, ({
-        theme      = 'From your theme',
-        reapertips = 'Theme default',
-        default    = 'Theme default',
-        fallback   = 'Default, theme color too dark',
-        custom     = 'Custom',
-    })[SB.accent_source] or '')
-    if SB.accent_source == 'custom' then
-        ImGui.SameLine(ctx)
+    -- Theme and accent share a row: the swatch sits after the dropdown, and
+    -- Reset (only for a custom accent) goes in front of it.
+    local custom = SB.accent_source == 'custom'
+    local reset_w = custom
+        and ImGui.CalcTextSize(ctx, 'Reset') + pad_x * 2 + gap_x or 0
+    setting_row('Theme', reset_w + PX(150) + gap_x + PX(24))
+    if custom then
         if ImGui.Button(ctx, 'Reset') then
             SB.clear_accent_override(SB.theme)
             SB.build_palette()
         end
+        hint('Back to the accent color of the current theme')
+        ImGui.SameLine(ctx)
     end
-    hint('Pick a custom accent color for the current theme')
+    ImGui.SetNextItemWidth(ctx, PX(150))
+    local look_at = 1
+    for i, v in ipairs(SB.LOOKS) do
+        if v == SB.cfg.look then look_at = i end
+    end
+    local rvl, pick_look = ImGui.Combo(ctx, '##look', look_at - 1,
+        SB.LOOK_LABEL)
+    if rvl then
+        SB.cfg.look = SB.LOOKS[pick_look + 1] or 'dark'
+        set_ext('look', SB.cfg.look)
+        SB.build_palette()
+    end
+    hint('Match REAPER picks light or dark from your REAPER theme')
 
-    ImGui.Dummy(ctx, 1, PX(2))
+    ImGui.SameLine(ctx)
+    local rva, picked = ImGui.ColorEdit3(ctx, '##accent',
+        SB.accent_rgb or 0,
+        ImGui.ColorEditFlags_NoInputs | ImGui.ColorEditFlags_NoTooltip)
+    if rva then
+        SB.set_accent_override(SB.theme, picked)
+        SB.build_palette()
+    end
+    hint('Accent: ' .. (({
+        theme      = 'from your theme',
+        reapertips = 'theme default',
+        default    = 'theme default',
+        fallback   = 'default, theme color too dark',
+        custom     = 'custom',
+    })[SB.accent_source] or '?') .. '. Click to pick another')
+
     local rvt, show_time = ImGui.Checkbox(ctx,
         'Show the time in the Modified column', SB.cfg.show_time)
     if rvt then
@@ -3386,11 +3730,32 @@ local function settings_popup()
             S.win_y + (S.win_h or 0) / 2, ImGui.Cond_Appearing, 0.5, 0.5)
     end
     ImGui.SetNextWindowSizeConstraints(ctx, PX(430), 0, PX(430), 6000)
-    if not ImGui.BeginPopupModal(ctx, 'Settings##sb', nil,
-            ImGui.WindowFlags_AlwaysAutoResize) then
+    -- No background or border of its own: both are painted below, after
+    -- the rounded dim, so the dim sits behind the dialog and not on it.
+    ImGui.PushStyleColor(ctx, ImGui.Col_PopupBg, C.clear)
+    ImGui.PushStyleVar(ctx, ImGui.StyleVar_WindowBorderSize, 0)
+    local open = ImGui.BeginPopupModal(ctx, 'Settings##sb', nil,
+        ImGui.WindowFlags_AlwaysAutoResize)
+    ImGui.PopStyleVar(ctx)
+    ImGui.PopStyleColor(ctx)
+    if not open then
         S.settings_open = false
         return
     end
+
+    local dl = ImGui.GetWindowDrawList(ctx)
+    local round = PX(12)
+    if S.win_x then
+        local x2, y2 = S.win_x + (S.win_w or 0), S.win_y + (S.win_h or 0)
+        ImGui.DrawList_PushClipRect(dl, S.win_x, S.win_y, x2, y2, false)
+        ImGui.DrawList_AddRectFilled(dl, S.win_x, S.win_y, x2, y2,
+            C.dim_bg, round)
+        ImGui.DrawList_PopClipRect(dl)
+    end
+    local px, py = ImGui.GetWindowPos(ctx)
+    local pw, ph = ImGui.GetWindowSize(ctx)
+    ImGui.DrawList_AddRectFilled(dl, px, py, px + pw, py + ph, C.popup, round)
+    ImGui.DrawList_AddRect(dl, px, py, px + pw, py + ph, C.border, round)
 
     ImGui.PushStyleVar(ctx, ImGui.StyleVar_WindowPadding, PX(14), PX(12))
     ImGui.PushStyleVar(ctx, ImGui.StyleVar_FramePadding, PX(9), PX(4))
@@ -3407,8 +3772,6 @@ local function settings_popup()
         settings_general()
     end
 
-    ImGui.Dummy(ctx, 1, PX(10))
-    ImGui.Separator(ctx)
     ImGui.Dummy(ctx, 1, PX(2))
 
     local w = PX(96)
@@ -3453,11 +3816,11 @@ local function handle_keys()
         ImGui.IsKeyPressed(ctx, ImGui.Key_KeypadEnter)
     if enter then
         if mods & MOD_CMD ~= 0 then
-            do_open('tab')
+            do_open(SB.alt_open())
         elseif mods & ImGui.Mod_Alt ~= 0 then
             do_open('copy')
         else
-            do_open('current')
+            do_open(SB.main_open())
         end
     end
 
@@ -3586,7 +3949,53 @@ function SB.frame()
     S.hint = nil
 end
 
+-- One FX per frame, so REAPER redraws between plug-ins and the count moves
+-- the way its own "Bringing FX Online" window does. It keeps running after
+-- the main window has closed; Cancel leaves the rest offline.
+local function fx_job_window()
+    local job = SB.fx_job
+    local done = SB.fx_online_step(job)
+    local cancel = false
+
+    push_style()
+    if S.win_x then
+        ImGui.SetNextWindowPos(ctx, S.win_x + (S.win_w or 0) / 2,
+            S.win_y + (S.win_h or 0) / 2, ImGui.Cond_Appearing, 0.5, 0.5)
+    end
+    ImGui.SetNextWindowSizeConstraints(ctx, PX(380), 0, PX(380), 6000)
+    local visible = ImGui.Begin(ctx, 'Bringing FX Online##fxjob', nil,
+        ImGui.WindowFlags_NoTitleBar | ImGui.WindowFlags_NoCollapse |
+        ImGui.WindowFlags_AlwaysAutoResize | ImGui.WindowFlags_NoScrollbar)
+    if visible then
+        ImGui.PushFont(ctx, nil, FS(BASE_FONT))
+        ImGui.TextColored(ctx, C.text_dim, 'Bringing FX Online')
+        ImGui.TextWrapped(ctx, ('%d/%d: %s'):format(job.i, #job.list, job.name))
+        local dl = ImGui.GetWindowDrawList(ctx)
+        local x, y = ImGui.GetCursorScreenPos(ctx)
+        local w = ImGui.GetContentRegionAvail(ctx)
+        local h = PX(6)
+        ImGui.DrawList_AddRectFilled(dl, x, y, x + w, y + h, C.frame, h / 2)
+        ImGui.DrawList_AddRectFilled(dl, x, y, x + w * job.i / #job.list,
+            y + h, C.accent, h / 2)
+        ImGui.Dummy(ctx, w, h)
+        if ImGui.Button(ctx, 'Cancel') then cancel = true end
+        ImGui.PopFont(ctx)
+    end
+    ImGui.End(ctx)
+    pop_style()
+
+    if done or cancel then SB.fx_job = nil end
+end
+
 local function loop()
+    if S.quit then
+        -- Main window closed with FX still coming online: only the
+        -- progress window is left.
+        if SB.fx_job then fx_job_window() end
+        if SB.fx_job then reaper.defer(loop) end
+        return
+    end
+
     reaper.SetExtState(SB.EXTNAME, 'heartbeat',
         tostring(reaper.time_precise()), false)
     if reaper.GetExtState(SB.EXTNAME, 'show_ui') == '1' then
@@ -3626,8 +4035,9 @@ local function loop()
     end
     ImGui.End(ctx)
     pop_style()
+    if SB.fx_job then fx_job_window() end
 
-    if not S.quit then
+    if not S.quit or SB.fx_job then
         reaper.defer(loop)
     end
 end
@@ -3649,6 +4059,7 @@ function SB.main()
     SB.cfg_load()
     SB.build_palette()
     reaper.atexit(function()
+        SB.fx_online_finish()
         reaper.DeleteExtState(SB.EXTNAME, 'heartbeat', false)
         reaper.DeleteExtState(SB.EXTNAME, 'show_ui', false)
         -- Toolbar toggle off. REAPER 7.03+ only.
