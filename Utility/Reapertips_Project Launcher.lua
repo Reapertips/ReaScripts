@@ -1,16 +1,12 @@
 --[[
   @description Project Launcher
   @author Reapertips (Alejandro Hernandez)
-  @version 1.1.0
+  @version 1.1.2
   @license MIT
   @changelog
-    - Light theme. Pick `Dark`, `Light` or `Match REAPER` in `Settings` > `General` > `Appearance`.
-    - New right-click options for projects: `Open with FX offline`, `Bring FX online after load` and `Open read-only`.
-    - `Bring FX online after load` keeps offline any FX that was already offline in the project.
-    - The sample rate is hidden when the project does not set its own.
-    - Open projects in a new tab by default: `Settings` > `General` > `Open projects in`. `Cmd/Ctrl` + `Enter` then opens in the current tab.
-    - With `New tab`, an empty project nobody touched (like the one REAPER starts with) is reused instead of left behind.
-    - Shorter `Settings` window.
+    - Opening a project that is already open now switches to its tab instead of loading it again.
+    - Fixed opening a recent project on Windows when its path in reaper.ini ended with a space (it loaded the default template instead).
+    - Fixed an error on Windows (`Missing PopStyleVar`) when `Open file...`, `New project` or opening a project showed a REAPER dialog.
   @link
     Reapertips https://www.reapertips.com
   @about
@@ -92,7 +88,7 @@
 
 local SB = {
     NAME    = 'Project Launcher',
-    VERSION = '1.1.0',
+    VERSION = '1.1.2',
     EXTNAME = 'RTIPS.ProjectLauncher',
     OLD_EXTNAME = 'RTIPS.StartBox',
 }
@@ -745,6 +741,9 @@ function SB.parse_recent_ini(text)
         elseif in_section then
             local key, value = line:match('^([^=]+)=(.*)$')
             if key then
+                -- REAPER trims ini values. A trailing space kept here made
+                -- Main_openProject fail on Windows and leave a template tab.
+                value = value:match('^%s*(.-)%s*$')
                 local idx = key:lower():match('^recent(%d+)$')
                 if idx and value ~= '' then
                     entries[#entries + 1] = { idx = tonumber(idx), path = value }
@@ -1415,6 +1414,17 @@ function SB.current_tab_empty()
     return reaper.IsProjectDirty(proj) == 0 and reaper.CountTracks(proj) == 0
 end
 
+-- The tab that already has this file open, if any.
+function SB.open_tab_of(path)
+    local i = 0
+    while true do
+        local proj, fn = reaper.EnumProjects(i)
+        if not proj then return nil end
+        if fn and fn ~= '' and SB.same_path(fn, path) then return proj end
+        i = i + 1
+    end
+end
+
 function SB.open(item, mode)
     if not item then return end
     if item.missing then
@@ -1426,6 +1436,18 @@ function SB.open(item, mode)
     if item.kind == 'tracktemplate' then
         reaper.Main_openProject(item.path)
         return true
+    end
+
+    -- The project at the top of Recent is usually the one already open.
+    -- Loading it again into a new tab left an empty tab (or the default
+    -- template) in front of it, so a plain open just goes to its tab.
+    if item.kind == 'project' and (mode == nil or mode == 'tab'
+            or mode == 'current') then
+        local proj = SB.open_tab_of(item.path)
+        if proj then
+            reaper.SelectProjectInstance(proj)
+            return true
+        end
     end
 
     -- With New tab as the default, the special opens follow it too.
@@ -1999,12 +2021,35 @@ local function open_labels()
     return 'Open', 'Open in new tab'
 end
 
+-- Anything that can open a REAPER dialog (Open, Save changes?, a missing
+-- file box) waits until the frame is closed. On Windows REAPER keeps running
+-- deferred scripts inside a modal dialog, so calling it mid-frame starts the
+-- next frame while this one still has its child windows and styles open:
+-- "ImGui_EndChild: Missing PopStyleVar()".
+SB.queue = {}
+function SB.later(fn) SB.queue[#SB.queue + 1] = fn end
+
+local function run_later()
+    local queue = SB.queue
+    SB.queue = {}
+    for _, fn in ipairs(queue) do fn() end
+end
+
+local function run_command(cmd)
+    SB.later(function()
+        reaper.Main_OnCommand(cmd, 0)
+        if not SB.cfg.keep_open then S.quit = true end
+    end)
+end
+
 local function do_open(mode)
     local item = selected()
     if not item then return end
-    if SB.open(item, mode) and not SB.cfg.keep_open then
-        S.quit = true
-    end
+    SB.later(function()
+        if SB.open(item, mode) and not SB.cfg.keep_open then
+            S.quit = true
+        end
+    end)
 end
 
 ------------------------------------------------------------------------------
@@ -2515,9 +2560,11 @@ end
 -- js_ReaScriptAPI, not a step everyone else has to walk through.
 local function add_root()
     if reaper.JS_Dialog_BrowseForFolder then
-        local ok, folder = reaper.JS_Dialog_BrowseForFolder(
-            'Folder with REAPER projects', '')
-        if ok == 1 and folder ~= '' then take_root(folder) end
+        SB.later(function()
+            local ok, folder = reaper.JS_Dialog_BrowseForFolder(
+                'Folder with REAPER projects', '')
+            if ok == 1 and folder ~= '' then take_root(folder) end
+        end)
         return
     end
     S.adding_root, S.new_root, S.root_focus = true, '', true
@@ -2666,18 +2713,15 @@ local function draw_rail(height)
         ImGui.PushStyleColor(ctx, ImGui.Col_Button, C.clear)
         rail_head('START')
         if ImGui.Button(ctx, 'New project', -1) then
-            reaper.Main_OnCommand(CMD_NEW_PROJECT, 0)
-            if not SB.cfg.keep_open then S.quit = true end
+            run_command(CMD_NEW_PROJECT)
         end
         hint('Empty project. ' .. SHORTCUT .. 'N')
         if ImGui.Button(ctx, 'New tab', -1) then
-            reaper.Main_OnCommand(CMD_NEW_TAB_NO_TEMPLATE, 0)
-            if not SB.cfg.keep_open then S.quit = true end
+            run_command(CMD_NEW_TAB_NO_TEMPLATE)
         end
         hint('New tab, no template')
         if ImGui.Button(ctx, 'Open file...', -1) then
-            reaper.Main_OnCommand(CMD_OPEN_PROJECT, 0)
-            if not SB.cfg.keep_open then S.quit = true end
+            run_command(CMD_OPEN_PROJECT)
         end
         hint('Pick a project file. ' .. SHORTCUT .. 'O')
         ImGui.PopStyleColor(ctx)
@@ -3097,7 +3141,7 @@ local function draw_list(width, height)
                                 ImGui.Separator(ctx)
                             end
                             if ImGui.MenuItem(ctx, 'Show in folder') then
-                                SB.reveal(item.path)
+                                SB.later(function() SB.reveal(item.path) end)
                             end
                             ImGui.EndPopup(ctx)
                             -- the popup ate the pushed size again
@@ -3369,7 +3413,9 @@ local function draw_detail(width, height)
             if ImGui.Button(ctx, 'Edit', third) then do_open('edit') end
             hint('Opens the template file itself, to change it')
             ImGui.SameLine(ctx)
-            if ImGui.Button(ctx, 'Folder', third) then SB.reveal(item.path) end
+            if ImGui.Button(ctx, 'Folder', third) then
+                SB.later(function() SB.reveal(item.path) end)
+            end
             hint('Shows the file in Finder')
         else
             if ImGui.Button(ctx, alt_label, -1) then do_open(SB.alt_open()) end
@@ -3832,11 +3878,9 @@ local function handle_keys()
 
     if mods & MOD_CMD ~= 0 then
         if ImGui.IsKeyPressed(ctx, ImGui.Key_N) then
-            reaper.Main_OnCommand(CMD_NEW_PROJECT, 0)
-            if not SB.cfg.keep_open then S.quit = true end
+            run_command(CMD_NEW_PROJECT)
         elseif ImGui.IsKeyPressed(ctx, ImGui.Key_O) then
-            reaper.Main_OnCommand(CMD_OPEN_PROJECT, 0)
-            if not SB.cfg.keep_open then S.quit = true end
+            run_command(CMD_OPEN_PROJECT)
         elseif ImGui.IsKeyPressed(ctx, ImGui.Key_F) then
             S.focus_search = true
         elseif ImGui.IsKeyPressed(ctx, ImGui.Key_Comma) then
@@ -4035,6 +4079,7 @@ local function loop()
     end
     ImGui.End(ctx)
     pop_style()
+    SB.guard('open', run_later)
     if SB.fx_job then fx_job_window() end
 
     if not S.quit or SB.fx_job then
