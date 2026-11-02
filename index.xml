@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Reapertips" commit="e8110c409a06bfed5b544aae4eef2346e3940343">
+<index version="1" name="Reapertips" commit="9ba6981d291918f18934c2563221e1b5eeb3f654">
   <category name="Tuner">
     <reapack name="Reapertips_TunerBox.lua" type="script" desc="TunerBox">
       <metadata>
@@ -135,6 +135,12 @@
 - With `New tab`, an empty project nobody touched (like the one REAPER starts with) is reused instead of left behind.
 - Shorter `Settings` window.]]></changelog>
         <source main="main">https://github.com/Reapertips/ReaScripts/raw/e8110c409a06bfed5b544aae4eef2346e3940343/Utility/Reapertips_Project%20Launcher.lua</source>
+      </version>
+      <version name="1.1.2" author="Reapertips (Alejandro Hernandez)" time="2026-11-02T18:03:10Z">
+        <changelog><![CDATA[- Opening a project that is already open now switches to its tab instead of loading it again.
+- Fixed opening a recent project on Windows when its path in reaper.ini ended with a space (it loaded the default template instead).
+- Fixed an error on Windows (`Missing PopStyleVar`) when `Open file...`, `New project` or opening a project showed a REAPER dialog.]]></changelog>
+        <source main="main">https://github.com/Reapertips/ReaScripts/raw/9ba6981d291918f18934c2563221e1b5eeb3f654/Utility/Reapertips_Project%20Launcher.lua</source>
       </version>
     </reapack>
     <reapack name="Reapertips_Speed Trainer.lua" type="script" desc="Speed Trainer">
