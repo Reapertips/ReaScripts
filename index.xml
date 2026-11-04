@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Reapertips" commit="b2c076ab37da953caef2c141317b4e659db1d5c0">
+<index version="1" name="Reapertips" commit="7c8e3677d55bafa366e9053875091270d5016ee8">
   <category name="Tuner">
     <reapack name="Reapertips_TunerBox.lua" type="script" desc="TunerBox">
       <metadata>
@@ -163,6 +163,13 @@
 - Fixed the `Missing PopStyleVar` error.
 - Fixed Ctrl+O leaving the windows stuck, even after Cancel.]]></changelog>
         <source main="main">https://github.com/Reapertips/ReaScripts/raw/4608aa754918981d64b906c64553785d801d6d81/Utility/Reapertips_Project%20Launcher.lua</source>
+      </version>
+      <version name="1.2.1" author="Reapertips (Alejandro Hernandez)" time="2026-11-04T14:23:21Z">
+        <changelog><![CDATA[- Fixed the `Missing PopStyleVar` error when opening the window. It came from the window being docked. Project Launcher now always opens as its own window.
+- The window now closes with the system's close shortcut, like Alt+F4, or Super+Q on COSMIC.
+- Dates now follow your computer's date format.
+- In Settings, Start on: "Last used" is now called "Last tab".]]></changelog>
+        <source main="main">https://github.com/Reapertips/ReaScripts/raw/7c8e3677d55bafa366e9053875091270d5016ee8/Utility/Reapertips_Project%20Launcher.lua</source>
       </version>
     </reapack>
     <reapack name="Reapertips_Speed Trainer.lua" type="script" desc="Speed Trainer">
