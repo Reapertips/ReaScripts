@@ -1,7 +1,7 @@
 --[[
   @description Time selection color for loop and record
   @author Reapertips (Alejandro Hernandez)
-  @version 1.2
+  @version 1.3
   @license MIT
   @link
     Reapertips https://www.reapertips.com
@@ -25,6 +25,8 @@
     - The time selection overlay in the arrange view
     - The time selection in the MIDI editor
     - The whole ruler strip. Marker and region lanes are left alone.
+    - The ruler strip in the MIDI editor. Off by default: REAPER also paints
+      the velocity lanes with it.
     Every one of those has its own intensity slider, per state: drag it down
     and the colour is mixed with your theme's own instead of replacing it, so
     you can go from a hint to full strength.
@@ -67,19 +69,11 @@
       TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
       SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   @changelog
-    - Every area can have its own colour: click the swatch at the end of its
-      row. A dot marks the areas that have one; right click the swatch to
-      follow the column colour again.
-    - Colours are picked in a small Hue / Saturation / Brightness popover
-      under the swatch, with nine preset colours and live changes. REAPER's
-      picker is one click away under More...
-    - Cleaner settings window: plain check marks, one column per state
-      (check, bar, swatch), and the % only shows while you drag.
-    - The bar numbers turn dark when the painted ruler strip is bright, so
-      they stay readable at any colour.
-    - The loop bar no longer disappears when the ruler strip is painted in
-      the same colour: it is pushed lighter or darker automatically.
---]]
+    - New MIDI editor ruler strip row, off by default. REAPER also paints the velocity lanes with it.
+    - Reset this theme now resets only the current theme. Colors and intensity are saved per theme.
+    - Fixed the ruler not being painted in Loop On.
+    - Fixed notes ending up out of order when dragging in the MIDI editor with the script running.
+]]
 
 ------------------------------------------------------------------------------
 -- Requirements
@@ -123,6 +117,13 @@ local ZONES = {
     -- deliberately NOT included: they carry the user's own content.
     { id = 'rulerbg', label = 'Whole ruler strip',
       keys = { 'col_tl_bg', 'ts_lane_bg' } },
+    -- The ruler strip inside the MIDI editor, a separate theme color. Off by
+    -- default: midi_rulerbg also paints the CC and velocity lanes, and no
+    -- theme key isolates the ruler. The help mark says so.
+    { id = 'midiruler', label = 'MIDI editor ruler strip',
+      keys = { 'midi_rulerbg' },
+      help = { 'REAPER also paints the velocity lanes.',
+               'Nothing we can do about it :(' } },
 }
 
 local STATES = {
@@ -139,6 +140,9 @@ local PREVIEW_KEYS = { 'col_arrangebg' }
 local TEXT_KEYS = {
     { key = 'col_tl_fg',  dark = { 0x16, 0x16, 0x16 }, light = { 0xEE, 0xEE, 0xEE } },
     { key = 'col_tl_fg2', dark = { 0x3C, 0x3C, 0x3C }, light = { 0xB4, 0xB4, 0xB4 } },
+    -- the MIDI editor ruler text, judged against its own strip
+    { key = 'midi_rulerfg', bg = 'midi_rulerbg',
+      dark = { 0x16, 0x16, 0x16 }, light = { 0xEE, 0xEE, 0xEE } },
 }
 
 -- Minimum brightness difference (0..1) before the text or the loop bar is
@@ -150,13 +154,16 @@ local BAR_PUSH      = 0.60
 -- Painted out of the box: the loop bar in the ruler and the MIDI editor. The
 -- arrange overlay is off, it covers a lot of screen and not everyone wants it.
 local DEFAULT_PAINT = {
-    loop = { ruler = true, arrange = false, midi = true, rulerbg = false },
-    rec  = { ruler = true, arrange = false, midi = true, rulerbg = false },
+    loop = { ruler = true, arrange = false, midi = true, rulerbg = false,
+             midiruler = false },
+    rec  = { ruler = true, arrange = false, midi = true, rulerbg = false,
+             midiruler = false },
 }
 
 -- Starting intensity per area. Full strength everywhere except the whole
 -- ruler strip, which at full strength buries the bar numbers.
-local DEFAULT_TINT = { ruler = 100, arrange = 100, midi = 100, rulerbg = 20 }
+local DEFAULT_TINT = { ruler = 100, arrange = 100, midi = 100, rulerbg = 20,
+                       midiruler = 20 }
 
 local DEFAULT_LOOP = 'FFC21E'
 local DEFAULT_REC  = 'FE6A6A'
@@ -169,7 +176,7 @@ local THEME_PRESETS = {
 }
 
 -- Window metrics in points; everything is multiplied by the display scale.
-local W, H  = 480, 332
+local W, H  = 480, 356
 local FONT  = 'Fira Sans' -- the OS substitutes if missing; the layout measures
 local FSIZE = 15
 
@@ -402,41 +409,76 @@ end
 -- Settings
 ------------------------------------------------------------------------------
 
-local settings = { enabled = GetBool('enabled', true), paint = {}, tint = {} }
-
--- 1.0 had a single ruler-strip tint. Carry it over so nobody's setting is
--- silently thrown away by the upgrade.
-local legacy_tint = tonumber(GetExt('tint_pct', ''))
-
-for _, st in ipairs(STATES) do
-    settings.paint[st.id] = {}
-    settings.tint[st.id] = {}
-    for _, z in ipairs(ZONES) do
-        settings.paint[st.id][z.id] =
-            GetBool('paint.' .. st.id .. '.' .. z.id,
-                DEFAULT_PAINT[st.id][z.id])
-        local default = DEFAULT_TINT[z.id]
-        if z.id == 'rulerbg' and legacy_tint then default = legacy_tint end
-        local v = tonumber(GetExt('tint.' .. st.id .. '.' .. z.id, ''))
-        settings.tint[st.id][z.id] =
-            Clamp(math.floor(v or default), 0, 100)
-    end
-end
-
-local function SavePaint(state, zone)
-    SetBool('paint.' .. state .. '.' .. zone, settings.paint[state][zone])
-end
-
-local function SaveTint(state, zone)
-    SetExt('tint.' .. state .. '.' .. zone, settings.tint[state][zone])
-end
-
 local theme_key, palette
+local settings = { enabled = GetBool('enabled', true), paint = {}, tint = {} }
 
 local function ThemeKey()
     local path = reaper.GetLastColorThemeFile() or ''
     local name = path:match('[^/\\]+$') or 'default'
     return (name:gsub('%.[Rr]eaper[Tt]heme[Zz]?[Ii]?[Pp]?$', ''))
+end
+
+-- Paint and intensity are saved per theme. Settings saved before that (one
+-- shared set of keys) are still read: a theme with no saved value of its own
+-- starts from the shared one, so nobody loses a setting on upgrade.
+local function PaintKey(state, zone)
+    return 'paint.' .. theme_key .. '.' .. state .. '.' .. zone
+end
+
+local function TintKey(state, zone)
+    return 'tint.' .. theme_key .. '.' .. state .. '.' .. zone
+end
+
+local function SavePaint(state, zone)
+    SetBool(PaintKey(state, zone), settings.paint[state][zone])
+end
+
+local function SaveTint(state, zone)
+    SetExt(TintKey(state, zone), settings.tint[state][zone])
+end
+
+-- 1.0 had a single ruler-strip tint. Carry it over so nobody's setting is
+-- silently thrown away by the upgrade.
+local legacy_tint = tonumber(GetExt('tint_pct', ''))
+
+-- Loads the paint and intensity of the current theme (theme_key must be set).
+local function LoadSettings()
+    for _, st in ipairs(STATES) do
+        settings.paint[st.id] = {}
+        settings.tint[st.id] = {}
+        for _, z in ipairs(ZONES) do
+            local shared_paint = GetBool('paint.' .. st.id .. '.' .. z.id,
+                DEFAULT_PAINT[st.id][z.id])
+            local paint = GetBool(PaintKey(st.id, z.id), shared_paint)
+            local default = DEFAULT_TINT[z.id]
+            if z.id == 'rulerbg' and legacy_tint then default = legacy_tint end
+            local shared_tint = tonumber(
+                GetExt('tint.' .. st.id .. '.' .. z.id, ''))
+            local own_tint = tonumber(GetExt(TintKey(st.id, z.id), ''))
+            local tint = Clamp(math.floor(own_tint or shared_tint or default),
+                0, 100)
+            -- An area checked with its intensity bar at 0 paints nothing,
+            -- which looks like a bug. Values read from the shared keys that
+            -- were saved that way get the default intensity back. Rows that
+            -- are unchecked are never touched.
+            local fixed = own_tint == nil and paint and tint == 0
+            if fixed then tint = DEFAULT_TINT[z.id] end
+            settings.paint[st.id][z.id] = paint
+            settings.tint[st.id][z.id] = tint
+            if fixed then SaveTint(st.id, z.id) end
+        end
+    end
+end
+
+-- Checking an area that sits at 0 % would paint nothing: give it full
+-- strength instead.
+local function SetPaint(state, zone, on)
+    settings.paint[state][zone] = on
+    SavePaint(state, zone)
+    if on and settings.tint[state][zone] == 0 then
+        settings.tint[state][zone] = 100
+        SaveTint(state, zone)
+    end
 end
 
 -- Two colors a user could not tell apart at a glance
@@ -493,6 +535,7 @@ end
 
 local function LoadPalette()
     theme_key = ThemeKey()
+    LoadSettings()
     LoadColumnColors()
     LoadRowColors()
 end
@@ -523,6 +566,12 @@ local function ResetPalette()
     for _, st in ipairs(STATES) do
         for _, z in ipairs(ZONES) do
             reaper.DeleteExtState(extname, RowKey(st.id, z.id), true)
+            -- Saved explicitly, not deleted: a missing per-theme value would
+            -- fall back to the shared keys of older versions.
+            settings.paint[st.id][z.id] = DEFAULT_PAINT[st.id][z.id]
+            settings.tint[st.id][z.id] = DEFAULT_TINT[z.id]
+            SavePaint(st.id, z.id)
+            SaveTint(st.id, z.id)
         end
     end
     LoadPalette()
@@ -590,7 +639,10 @@ local function ForceColor(key, native)
     reaper.SetThemeColor(key, native, 0)
     applied[key] = native
     dirty = true
-    if key == 'midi_selbg' then dirty_midi = true end
+    if key == 'midi_selbg' or key == 'midi_rulerbg' or
+        key == 'midi_rulerfg' then
+        dirty_midi = true
+    end
 end
 
 local function RestoreColor(key)
@@ -598,18 +650,53 @@ local function RestoreColor(key)
     reaper.SetThemeColor(key, baseline[key], 0)
     applied[key] = nil
     dirty = true
-    if key == 'midi_selbg' then dirty_midi = true end
+    if key == 'midi_selbg' or key == 'midi_rulerbg' or
+        key == 'midi_rulerfg' then
+        dirty_midi = true
+    end
 end
 
-local function Flush()
+-- An open MIDI editor is refreshed at most this often while a color is being
+-- dragged; the last change is always applied by PumpMidi.
+local MIDI_REFRESH_GAP = 0.12
+local last_midi_refresh = -1e9
+
+local function RefreshMidi()
+    last_midi_refresh = reaper.time_precise()
+    dirty_midi = false
+    if reaper.APIExists('ThemeLayout_RefreshAll') then
+        reaper.ThemeLayout_RefreshAll()
+    end
+    local ed = reaper.MIDIEditor_GetActive and reaper.MIDIEditor_GetActive()
+    local take = ed and reaper.MIDIEditor_GetTake and
+        reaper.MIDIEditor_GetTake(ed)
+    if take then
+        if reaper.MIDI_RefreshEditors then reaper.MIDI_RefreshEditors(take) end
+        if reaper.MIDI_Sort then reaper.MIDI_Sort(take) end
+    end
+end
+
+-- Called every frame: applies a MIDI refresh that was held back, so the final
+-- state after a drag is always sorted and repainted.
+local function PumpMidi()
+    if dirty_midi and
+        reaper.time_precise() - last_midi_refresh >= MIDI_REFRESH_GAP then
+        RefreshMidi()
+    end
+end
+
+local function Flush(force)
     if not dirty then return end
     reaper.UpdateArrange()
     reaper.UpdateTimeline()
-    -- An already-open MIDI editor does not repaint from UpdateArrange.
-    if dirty_midi and reaper.APIExists('ThemeLayout_RefreshAll') then
-        reaper.ThemeLayout_RefreshAll()
+    dirty = false
+    -- An already-open MIDI editor repaints from none of the calls above, nor
+    -- from ThemeLayout_RefreshAll alone. Re-sorting its take does, and leaves
+    -- the project unmodified. It is the costly part, so it is throttled.
+    if dirty_midi and (force or
+        reaper.time_precise() - last_midi_refresh >= MIDI_REFRESH_GAP) then
+        RefreshMidi()
     end
-    dirty, dirty_midi = false, false
 end
 
 local function RestoreAll()
@@ -617,7 +704,7 @@ local function RestoreAll()
         for _, key in ipairs(z.live) do RestoreColor(key) end
     end
     for _, t in ipairs(TEXT_KEYS) do RestoreColor(t.key) end
-    Flush()
+    Flush(true)
 end
 
 local function RGBNative(rgb)
@@ -644,16 +731,17 @@ local function StateColors(state)
 
     -- A painted ruler strip can swallow the bar numbers and the loop bar.
     -- Push whichever is too close to it towards black or white.
+    for _, t in ipairs(TEXT_KEYS) do
+        local bgc = out[t.bg or 'col_tl_bg']
+        local fg = bgc and t.live and Baseline(t.key)
+        if fg and math.abs(Luma(fg) - Luma(bgc)) < TEXT_CONTRAST then
+            out[t.key] = RGBNative(Luma(bgc) > 0.5 and t.dark or t.light)
+        end
+    end
+
     local strip = out['col_tl_bg']
     if not strip then return out end
     local bright = Luma(strip) > 0.5
-
-    for _, t in ipairs(TEXT_KEYS) do
-        local fg = t.live and Baseline(t.key)
-        if fg and math.abs(Luma(fg) - Luma(strip)) < TEXT_CONTRAST then
-            out[t.key] = RGBNative(bright and t.dark or t.light)
-        end
-    end
 
     local bar = out['col_tl_bgsel2'] or Baseline('col_tl_bgsel2')
     if bar and math.abs(Luma(bar) - Luma(strip)) < BAR_CONTRAST then
@@ -855,8 +943,7 @@ local function Cell(x, y, state, zone, disabled)
     CheckBox(x, y, box, on, disabled)
     if not disabled then
         AddHot(x - 3 * S, y - 4 * S, box + 6 * S, box + 8 * S, function()
-            settings.paint[state][zone] = not settings.paint[state][zone]
-            SavePaint(state, zone)
+            SetPaint(state, zone, not settings.paint[state][zone])
             last_state = nil
         end)
     end
@@ -889,14 +976,15 @@ local function Cell(x, y, state, zone, disabled)
             function(mx)
                 -- dragging an area you had switched off turns it on: the bar
                 -- is meaningless otherwise, and it saves a second click
-                if not settings.paint[state][zone] then
-                    settings.paint[state][zone] = true
-                    SavePaint(state, zone)
-                end
+                -- a bar at 0 paints nothing, so it clears the check
                 local v = math.floor(Clamp((mx - bx) / bw, 0, 1) * 100 + 0.5)
-                if v == settings.tint[state][zone] then return end
+                local want = v > 0
+                if want == settings.paint[state][zone] and
+                    v == settings.tint[state][zone] then return end
                 settings.tint[state][zone] = v
                 SaveTint(state, zone)
+                settings.paint[state][zone] = want
+                SavePaint(state, zone)
                 last_state = nil
             end)
         r.cell = id
@@ -926,8 +1014,7 @@ local function Cell(x, y, state, zone, disabled)
     AddHot(sx - 3 * S, y - 4 * S, sw + 6 * S, box + 8 * S, function()
         OpenPop(state, zone, sx, sy, sw, sh)
         if not settings.paint[state][zone] then
-            settings.paint[state][zone] = true
-            SavePaint(state, zone)
+            SetPaint(state, zone, true)
             last_state = nil
         end
     end, nil, function()
@@ -1351,8 +1438,52 @@ local function ThemeTitle(x, y, maxw)
     Text(nx, y, name)
 end
 
+-- A small circled ? after a row's label. Hovering it shows the row's note,
+-- drawn last by DrawUI so it sits over the rows above.
+local HELP_R   = 6
+local HELP_GAP = 7
+local help_tip = nil
+
+local function HelpMark(cx, cy, lines)
+    local r = math.floor(HELP_R * S)
+    local reach = r + math.floor(3 * S)
+    local over = not pop and not dragging and
+        math.abs(gfx.mouse_x - cx) <= reach and
+        math.abs(gfx.mouse_y - cy) <= reach
+    SetCol(over and COL_TEXT or COL_DIM, over and 1 or 0.7)
+    gfx.circle(cx, cy, r, 0, 1)
+    gfx.setfont(2, FONT, math.floor(10 * S))
+    local tw, th = gfx.measurestr('?')
+    Text(math.floor(cx - tw / 2 + 0.5), math.floor(cy - th / 2 + 0.5), '?')
+    gfx.setfont(1, FONT, math.floor(FSIZE * S))
+    if over then help_tip = { lines = lines, x = cx - r, y = cy - r } end
+end
+
+local function DrawHelpTip()
+    gfx.setfont(2, FONT, math.floor(11 * S))
+    local bw, lh = 0, TextH()
+    for _, line in ipairs(help_tip.lines) do
+        bw = math.max(bw, (gfx.measurestr(line)))
+    end
+    local px, py = math.floor(8 * S), math.floor(5 * S)
+    bw = bw + px * 2
+    local bh = lh * #help_tip.lines + py * 2
+    local bx = math.floor(Clamp(help_tip.x, 0, math.max(0, gfx.w - bw)))
+    local by = math.max(0, math.floor(help_tip.y - bh - 4 * S))
+    SetCol(COL_POP)
+    gfx.rect(bx, by, bw, bh, 1)
+    SetCol(COL_BOX)
+    gfx.rect(bx, by, bw, bh, 0)
+    SetCol(COL_TEXT)
+    for i, line in ipairs(help_tip.lines) do
+        Text(bx + px, by + py + (i - 1) * lh, line)
+    end
+    gfx.setfont(1, FONT, math.floor(FSIZE * S))
+end
+
 local function DrawUI()
     hot = {}
+    help_tip = nil
     local retina = (gfx.ext_retina and gfx.ext_retina > 0) and gfx.ext_retina
         or 1
     S = math.max(retina, dpi_scale)
@@ -1370,7 +1501,9 @@ local function DrawUI()
     -- the columns collide with the labels.
     local labelw = 0
     for _, z in ipairs(ZONES) do
-        labelw = math.max(labelw, gfx.measurestr(z.label))
+        local lw = gfx.measurestr(z.label)
+        if z.help then lw = lw + (HELP_GAP + HELP_R * 2) * S end
+        labelw = math.max(labelw, lw)
     end
     if not resized then
         resized = true
@@ -1441,6 +1574,10 @@ local function DrawUI()
     for _, z in ipairs(ZONES) do
         SetCol(z.supported and COL_TEXT or COL_DIM)
         Text(x, y + (15 * S - th) / 2, z.label)
+        if z.help then
+            HelpMark(math.floor(x + gfx.measurestr(z.label) +
+                (HELP_GAP + HELP_R) * S), math.floor(y + 7.5 * S), z.help)
+        end
         for _, st in ipairs(STATES) do
             Cell(col[st.id], y, st.id, z.id, not z.supported)
         end
@@ -1448,7 +1585,7 @@ local function DrawUI()
     end
     y = y + math.floor(10 * S)
 
-    Link(x, y, 'Reset colors for this theme', function()
+    Link(x, y, 'Reset this theme', function()
         pop = nil
         ResetPalette()
         last_state = nil
@@ -1474,6 +1611,8 @@ local function DrawUI()
         Text(lx + math.floor(4 * S), ly + math.floor(1 * S), drag_label.text)
         gfx.setfont(1, FONT, math.floor(FSIZE * S))
     end
+
+    if help_tip then DrawHelpTip() end
 
     DrawPop()
 end
@@ -1578,6 +1717,7 @@ end
 local function Tick()
     -- A drawing glitch must not be able to take the color engine down with it,
     -- and must never leave the theme half-painted.
+    pcall(PumpMidi)
     local ok, err = pcall(Frame)
     if not ok and not error_shown then
         error_shown = true
