@@ -1,12 +1,20 @@
 --[[
   @description Project Launcher
   @author Reapertips (Alejandro Hernandez)
-  @version 1.1.2
+  @version 1.2.0
   @license MIT
   @changelog
-    - Opening a project that is already open now switches to its tab instead of loading it again.
-    - Fixed opening a recent project on Windows when its path in reaper.ini ended with a space (it loaded the default template instead).
-    - Fixed an error on Windows (`Missing PopStyleVar`) when `Open file...`, `New project` or opening a project showed a REAPER dialog.
+    - You can now select several projects (Cmd/Ctrl+click, Shift+click) and open or remove them together.
+    - Middle click opens a project in a new tab.
+    - You can now remove a project from Recent, with Undo.
+    - New: backups of the selected project, so you can open one without browsing folders. Right click a backup for more ways to open it.
+    - New setting: Show on every new empty tab.
+    - Read-only and FX offline can now be combined, with checkboxes above Open.
+    - Templates can now open with FX offline, from the panel or the right-click menu.
+    - Cmd/Ctrl+W closes the window. On Linux, Super+Q closes it too.
+    - Fixed a project failing to load and leaving an empty tab. It now shows what happened and closes that tab.
+    - Fixed the `Missing PopStyleVar` error.
+    - Fixed Ctrl+O leaving the windows stuck, even after Cancel.
   @link
     Reapertips https://www.reapertips.com
   @about
@@ -88,7 +96,7 @@
 
 local SB = {
     NAME    = 'Project Launcher',
-    VERSION = '1.1.2',
+    VERSION = '1.2.0',
     EXTNAME = 'RTIPS.ProjectLauncher',
     OLD_EXTNAME = 'RTIPS.StartBox',
 }
@@ -114,12 +122,77 @@ do
     ImGui = mod
 end
 
+-- Everything ImGui expects to be closed again (windows, tables, popups,
+-- pushed styles and fonts) is remembered here as it opens. If a frame throws
+-- halfway through, SB.guard closes whatever is still open, newest first, so
+-- ReaImGui never sees an unbalanced stack and raises a second error on top
+-- of the real one ("Missing PopStyleVar", "Missing EndChild").
+SB.scopes = {}
+do
+    local scopes = SB.scopes
+    local function opener(name, close, always)
+        local f = rawget(ImGui, name)
+        local c = rawget(ImGui, close)
+        if not f or not c then return end
+        ImGui[name] = function(ctx_, ...)
+            local a, b = f(ctx_, ...)
+            if always or a then scopes[#scopes + 1] = { close, c, ctx_ } end
+            return a, b
+        end
+    end
+    local function closer(name, counted)
+        local f = rawget(ImGui, name)
+        if not f then return end
+        ImGui[name] = function(ctx_, ...)
+            local n = counted and (... or 1) or 1
+            for _ = 1, n do
+                for i = #scopes, 1, -1 do
+                    if scopes[i][1] == name then
+                        table.remove(scopes, i)
+                        break
+                    end
+                end
+            end
+            return f(ctx_, ...)
+        end
+    end
+    opener('Begin', 'End', true)
+    opener('BeginChild', 'EndChild', true)
+    opener('BeginTable', 'EndTable', false)
+    opener('BeginPopupContextItem', 'EndPopup', false)
+    opener('BeginPopupModal', 'EndPopup', false)
+    opener('BeginMenu', 'EndMenu', false)
+    opener('BeginDragDropSource', 'EndDragDropSource', false)
+    opener('BeginDragDropTarget', 'EndDragDropTarget', false)
+    opener('BeginDisabled', 'EndDisabled', true)
+    opener('PushStyleVar', 'PopStyleVar', true)
+    opener('PushStyleColor', 'PopStyleColor', true)
+    opener('PushFont', 'PopFont', true)
+    opener('PushID', 'PopID', true)
+    for _, name in ipairs({ 'End', 'EndChild', 'EndTable', 'EndPopup',
+            'EndMenu', 'EndDragDropSource', 'EndDragDropTarget',
+            'EndDisabled', 'PopID', 'PopFont' }) do
+        closer(name, false)
+    end
+    closer('PopStyleVar', true)
+    closer('PopStyleColor', true)
+end
+
+function SB.unwind(mark)
+    local scopes = SB.scopes
+    while #scopes > mark do
+        local s = table.remove(scopes)
+        pcall(s[2], s[3])
+    end
+end
+
 local HAS_JS  = reaper.JS_File_Stat ~= nil
 local HAS_SWS = reaper.CF_LocateInExplorer ~= nil or reaper.BR_Win32_GetPrivateProfileString ~= nil
 
 local OS      = reaper.GetOS()
 local IS_WIN  = OS:find('Win') ~= nil
 local IS_MAC  = OS:find('OSX') ~= nil or OS:find('macOS') ~= nil
+local IS_LINUX = not IS_WIN and not IS_MAC
 local SEP     = IS_WIN and '\\' or '/'
 SB.SEP = SEP
 
@@ -192,7 +265,8 @@ local API_NAMES = {
     'TableNeedSort', 'TableNextRow', 'TableSetColumnIndex',
     'TableSetupColumn', 'TableSetupScrollFreeze', 'Text', 'TextColored',
     'TextWrapped', 'WindowFlags_AlwaysAutoResize', 'WindowFlags_NoCollapse', 'WindowFlags_NoScrollWithMouse', 'WindowFlags_NoScrollbar',
-    'WindowFlags_NoTitleBar',
+    'WindowFlags_NoTitleBar', 'IsItemClicked', 'MouseButton_Middle',
+    'Key_W', 'Key_Q', 'Key_A', 'Key_Delete', 'Mod_Shift',
 }
 
 function SB.check_api()
@@ -512,12 +586,14 @@ function SB.cfg_load()
     SB.cfg.show_time     = get_bool('show_time', false)
     SB.cfg.look          = get_ext('look', 'dark')
     SB.cfg.skip_if_open  = get_bool('skip_if_open', true)
+    SB.cfg.watch_tabs    = get_bool('watch_tabs', false)
     SB.cfg.view          = get_ext('view', 'recent')
     SB.cfg.open_on       = get_ext('open_on', 'last')
     SB.cfg.open_in       = get_ext('open_in', 'current')
     SB.cfg.sections      = SB.list_decode(get_ext('sections', ''))
     SB.cfg.filed         = SB.map_decode(get_ext('filed', ''))
     SB.cfg.used          = SB.map_decode(get_ext('used', ''))
+    SB.cfg.hidden        = SB.map_decode(get_ext('hidden', ''))
     local scale_pct = math.floor(SB.UI_DEFAULT.scale * 100 + 0.5)
     local font_pct   = math.floor(SB.UI_DEFAULT.font * 100 + 0.5)
     SB.ui.scale = math.max(0.8, math.min(2.0,
@@ -787,22 +863,92 @@ function SB.read_file(path, max_bytes)
     return data
 end
 
+-- Projects taken out of Recent from here. REAPER's own list cannot be edited
+-- while it runs, so they are hidden instead: path -> the rank they had when
+-- they were removed. A better rank later means REAPER moved the project up
+-- again, which only happens when it was opened, so it comes back by itself.
+-- File > Recent projects is untouched.
+function SB.hidden_save()
+    set_ext('hidden', SB.map_encode(SB.cfg.hidden or {}))
+end
+
+function SB.hide_recent(items)
+    SB.cfg.hidden = SB.cfg.hidden or {}
+    local n = 0
+    for _, item in ipairs(items) do
+        if item.kind == 'project' and item.order then
+            SB.cfg.hidden[SB.path_key(item.path)] = tostring(item.order)
+            n = n + 1
+        end
+    end
+    if n > 0 then SB.hidden_save() end
+    return n
+end
+
+function SB.unhide_recent(path)
+    local hidden = SB.cfg.hidden
+    local key = SB.path_key(path)
+    if hidden and hidden[key] then
+        hidden[key] = nil
+        SB.hidden_save()
+        return true
+    end
+    return false
+end
+
+function SB.unhide_all()
+    SB.cfg.hidden = {}
+    SB.hidden_save()
+end
+
 function SB.load_recents()
     local ini = reaper.get_ini_file()
     local text = ini and SB.read_file(ini)
     if not text then return {} end
     local list = {}
+    local hidden = SB.cfg.hidden or {}
+    local still_there, changed = {}, false
+    SB.removed_n = 0
     for order, path in ipairs(SB.parse_recent_ini(text)) do
-        local dir, file = SB.split_path(path)
-        list[#list + 1] = {
-            path    = path,
-            name    = SB.strip_ext(file),
-            dir     = dir,
-            order   = order,
-            missing = not reaper.file_exists(path),
-            kind    = 'project',
-        }
+        local key = SB.path_key(path)
+        local rank = tonumber(hidden[key])
+        if rank and order < rank then
+            hidden[key] = nil
+            changed = true
+            rank = nil
+        elseif rank and order > rank then
+            -- Pushed down by newer projects. Following it keeps the rank
+            -- honest, so a project hidden at the top comes back once it is
+            -- opened again after something else.
+            hidden[key] = tostring(order)
+            changed = true
+        end
+        if rank then
+            still_there[key] = true
+            SB.removed_n = SB.removed_n + 1
+        else
+            local dir, file = SB.split_path(path)
+            list[#list + 1] = {
+                path    = path,
+                name    = SB.strip_ext(file),
+                dir     = dir,
+                order   = order,
+                missing = not reaper.file_exists(path),
+                kind    = 'project',
+            }
+        end
     end
+    -- A project REAPER has dropped from its list has nothing left to hide.
+    -- An empty read (file busy or half written) says nothing about that.
+    if next(still_there) ~= nil or #list > 0 then
+        for key in pairs(hidden) do
+            if not still_there[key] then
+                hidden[key] = nil
+                changed = true
+            end
+        end
+    end
+    if changed then SB.hidden_save() end
     return list
 end
 
@@ -1214,6 +1360,130 @@ function SB.meta_for(path)
 end
 
 ------------------------------------------------------------------------------
+-- Backups of a project
+--
+-- REAPER writes timestamped copies, "Name-2026-10-30_1844.rpp-bak", into the
+-- project folder, a Backups folder next to it, or the folder set under
+-- Preferences > Project > Backups (autosavedir in reaper.ini). Each folder
+-- is listed once and grouped by project name; a project then looks itself up
+-- in that, so selecting a row never walks a big folder again.
+------------------------------------------------------------------------------
+
+SB.bk_dirs, SB.bk_cache = {}, {}
+SB.BK_MAX_FILES = 20000
+
+function SB.autosave_dir()
+    if SB.autosave == nil then
+        SB.autosave = false
+        local ini = reaper.get_ini_file()
+        local text = ini and SB.read_file(ini)
+        local dir = text and text:match('\n%s*autosavedir=([^\r\n]*)')
+        if dir then
+            dir = dir:match('^%s*(.-)%s*$')
+            if dir ~= '' then SB.autosave = dir end
+        end
+    end
+    return SB.autosave
+end
+
+local function is_absolute(path)
+    return path:sub(1, 1) == '/' or path:sub(1, 1) == '\\'
+        or path:match('^%a:') ~= nil
+end
+
+function SB.backup_dirs(path)
+    local dir = SB.split_path(path)
+    local list = { dir, SB.join(dir, 'Backups') }
+    local auto = SB.autosave_dir()
+    if auto then
+        list[#list + 1] = is_absolute(auto) and auto or SB.join(dir, auto)
+    end
+    return list
+end
+
+-- Name and time out of a backup's file name. A name with no time in it is
+-- the copy REAPER keeps of the previous save.
+function SB.parse_backup_name(file)
+    local name, y, mo, d, h, mi, sec = file:match(
+        '^(.*)%-(%d%d%d%d)%-(%d%d)%-(%d%d)_(%d%d)(%d%d)(%d?%d?)%.[Rr][Pp][Pp]%-[Bb][Aa][Kk]$')
+    if name and name ~= '' then
+        local ok, t = pcall(os.time, { year = tonumber(y), month = tonumber(mo),
+            day = tonumber(d), hour = tonumber(h), min = tonumber(mi),
+            sec = tonumber(sec) or 0 })
+        return name, ok and t or nil
+    end
+    name = file:match('^(.*)%.[Rr][Pp][Pp]%-[Bb][Aa][Kk]$')
+    if name and name ~= '' then return name, nil end
+end
+
+function SB.dir_index(dir)
+    local cached = SB.bk_dirs[dir]
+    if cached then return cached end
+    local index = {}
+    reaper.EnumerateFiles(dir, -1) -- forget REAPER's cached listing
+    local i, file = 0, reaper.EnumerateFiles(dir, 0)
+    while file and i < SB.BK_MAX_FILES do
+        local name, t = SB.parse_backup_name(file)
+        if name then
+            local key = SB.path_key(name)
+            index[key] = index[key] or {}
+            local list = index[key]
+            list[#list + 1] = { path = SB.join(dir, file), file = file, t = t }
+        end
+        i = i + 1
+        file = reaper.EnumerateFiles(dir, i)
+    end
+    SB.bk_dirs[dir] = index
+    return index
+end
+
+-- Newest first. Cached per project; F5 forgets it.
+function SB.backups_of(path)
+    -- A backup made while the window stays open turns up when another
+    -- project is picked after a minute. A static selection never lists
+    -- folders from inside the frame.
+    if path ~= SB.bk_last then
+        SB.bk_last = path
+        local now = reaper.time_precise()
+        if now - (SB.bk_at or 0) > 60 then
+            SB.bk_dirs, SB.bk_cache, SB.bk_at = {}, {}, now
+        end
+    end
+    local cached = SB.bk_cache[path]
+    if cached then return cached end
+    local _, file = SB.split_path(path)
+    local key = SB.path_key(SB.strip_ext(file))
+    local out, seen, dirs = {}, {}, {}
+    for _, dir in ipairs(SB.backup_dirs(path)) do
+        if not dirs[dir] then
+            dirs[dir] = true
+            for _, e in ipairs(SB.dir_index(dir)[key] or {}) do
+                if not seen[e.path] then
+                    seen[e.path] = true
+                    -- The previous-save copy has no time in its name.
+                    if not e.t then e.t = SB.file_mtime(e.path) end
+                    out[#out + 1] = e
+                end
+            end
+        end
+    end
+    table.sort(out, function(a, b) return (a.t or 0) > (b.t or 0) end)
+    SB.bk_cache[path] = out
+    return out
+end
+
+-- "Today 14:30", "Yesterday 09:12", "Oct 30 18:44".
+function SB.when_label(t, now)
+    if not t then return 'Last save' end
+    now = now or os.time()
+    local hm = os.date('%H:%M', t)
+    local day = os.date('%Y%m%d', t)
+    if day == os.date('%Y%m%d', now) then return 'Today ' .. hm end
+    if day == os.date('%Y%m%d', now - 86400) then return 'Yesterday ' .. hm end
+    return os.date('%b %d', t) .. ' ' .. hm
+end
+
+------------------------------------------------------------------------------
 -- Filtering
 ------------------------------------------------------------------------------
 
@@ -1255,6 +1525,7 @@ local CMD_NEW_TAB_NO_TEMPLATE = 41929 -- New project tab (ignore default templat
 local CMD_SAVE_NEW_VERSION    = 41895 -- Save new version of project
 local CMD_NEW_PROJECT         = 40023
 local CMD_OPEN_PROJECT        = 40025
+local CMD_CLOSE_TAB           = 40860 -- File: Close current project tab
 
 -- GUIDs of the FX the .rpp saved as online. Each FX is a BYPASS line
 -- (bypass, offline, ...) before its plug-in block and an FXID line after
@@ -1425,8 +1696,43 @@ function SB.open_tab_of(path)
     end
 end
 
-function SB.open(item, mode)
+-- Tabs the launcher makes itself must not wake it up again: the watcher
+-- ignores any tab that appears within a few seconds of this.
+function SB.own_tab()
+    SB.own_until = reaper.time_precise() + 3
+end
+
+function SB.tab_count()
+    local n = 0
+    while reaper.EnumProjects(n) do n = n + 1 end
+    return n
+end
+
+-- True when the current tab holds this file. Compared by path first, then
+-- by file name, so a mapped drive or a symlink does not look like a failure.
+function SB.project_loaded(path)
+    local _, now = reaper.EnumProjects(-1)
+    if not now or now == '' then return false end
+    if SB.same_path(now, path) then return true end
+    -- Same name elsewhere: only a mapped drive or a link to the very same
+    -- file counts, which shows as the same size and time. A different
+    -- project with the same name is not the one asked for.
+    local _, a = SB.split_path(now)
+    local _, b = SB.split_path(path)
+    if SB.path_key(a) ~= SB.path_key(b) then return false end
+    local sa, sb = SB.file_size(now), SB.file_size(path)
+    if not sa or sa ~= sb then return false end
+    local ta, tb = SB.file_mtime(now), SB.file_mtime(path)
+    return ta ~= nil and ta == tb
+end
+
+-- opts: tab (always a new tab), offline (every FX loads offline), online
+-- (bring them back afterwards, needs offline), readonly. The mode strings
+-- 'offline', 'online' and 'readonly' are the same flags, one at a time.
+-- Returns true when the project is open, false plus a reason when it is not.
+function SB.open(item, mode, opts)
     if not item then return end
+    opts = opts or {}
     if item.missing then
         reaper.MB('This file is not there any more:\n\n' .. item.path,
             'Project Launcher', 0)
@@ -1438,62 +1744,92 @@ function SB.open(item, mode)
         return true
     end
 
+    local online = opts.online or mode == 'online'
+    local offline = opts.offline or online or mode == 'offline'
+    local readonly = opts.readonly or mode == 'readonly'
+
     -- The project at the top of Recent is usually the one already open.
     -- Loading it again into a new tab left an empty tab (or the default
     -- template) in front of it, so a plain open just goes to its tab.
-    if item.kind == 'project' and (mode == nil or mode == 'tab'
-            or mode == 'current') then
+    if item.kind == 'project' and not offline and not readonly
+            and (mode == nil or mode == 'tab' or mode == 'current') then
         local proj = SB.open_tab_of(item.path)
         if proj then
             reaper.SelectProjectInstance(proj)
+            SB.unhide_recent(item.path)
             return true
         end
     end
 
     -- With New tab as the default, the special opens follow it too.
     local default_tab = SB.cfg.open_in == 'tab'
-    local new_tab = mode == 'tab' or mode == 'copy' or (default_tab
-        and mode ~= 'current')
+    local new_tab = opts.tab or mode == 'tab' or mode == 'copy'
+        or (default_tab and mode ~= 'current')
+    local made_tab = false
     if new_tab and not (default_tab and SB.current_tab_empty()) then
+        SB.own_tab()
         reaper.Main_OnCommand(CMD_NEW_TAB_NO_TEMPLATE, 0)
+        made_tab = true
     end
 
-    local online
+    local online_fx
     -- Reopening the open project with unsaved changes asks to save first.
     -- A real load comes back clean; still dirty means the prompt was
     -- cancelled, and read-only must not lock that unsaved session.
     local _, cur = reaper.EnumProjects(-1)
     local was_dirty = cur and SB.same_path(cur, item.path)
         and reaper.IsProjectDirty(0) == 1
+    local dirty_before = reaper.IsProjectDirty(0) == 1
+    local tabs_before = SB.tab_count()
 
     if item.kind == 'template' and mode ~= 'edit' then
-        reaper.Main_openProject('template:' .. item.path)
-    elseif mode == 'offline' then
+        reaper.Main_openProject((offline and 'fxoffline:' or '')
+            .. 'template:' .. item.path)
+    elseif offline then
         -- REAPER's own recovery mode: every FX loads offline, so a plug-in
-        -- that crashes on load can be found and removed.
-        reaper.Main_openProject('fxoffline:' .. item.path)
-    elseif mode == 'online' then
-        -- No open prefix either: load with FX offline, then bring back the
-        -- ones the .rpp had online. Read the file first so a failed read
-        -- falls back to a plain open instead of leaving everything offline.
-        online = SB.rpp_online_fx(item.path)
-        reaper.Main_openProject((online and 'fxoffline:' or '') .. item.path)
+        -- that crashes on load can be found and removed. To bring them back
+        -- afterwards, read the file first so a failed read falls back to a
+        -- plain open instead of leaving everything offline.
+        if online then online_fx = SB.rpp_online_fx(item.path) end
+        reaper.Main_openProject((online and not online_fx and '' or 'fxoffline:')
+            .. item.path)
     else
         reaper.Main_openProject(item.path)
+    end
+
+    -- A project that did not load leaves nothing behind but the empty tab
+    -- made for it. A cancelled save prompt is not a failure: the old
+    -- project is still there, untouched.
+    if item.kind == 'project' and not opts.noverify
+            and not SB.project_loaded(item.path) then
+        local _, now = reaper.EnumProjects(-1)
+        if dirty_before and not made_tab and reaper.IsProjectDirty(0) == 1
+                and (cur or '') == (now or '') then
+            return false, 'cancelled'
+        end
+        -- The tab made for it, or one REAPER opened on its own when the
+        -- load failed, whichever left an empty tab in front.
+        if (made_tab or SB.tab_count() > tabs_before)
+                and SB.current_tab_empty() then
+            reaper.Main_OnCommand(CMD_CLOSE_TAB, 0)
+        end
+        return false, 'not_loaded'
     end
 
     -- Read-only has no open prefix. Flag the project once it is loaded, the
     -- same state the Open dialog's "Open as read-only" leaves behind, but
     -- only if the project that loaded is the one asked for: a cancelled
     -- save prompt must not lock whatever was open before.
-    if (mode == 'readonly' and reaper.GetSetProjectInfo) or online then
+    if (readonly and reaper.GetSetProjectInfo) or online_fx then
         local proj, now = reaper.EnumProjects(-1)
-        if now and SB.same_path(now, item.path)
-                and not (mode == 'readonly' and was_dirty
+        if now and ((opts.noverify and (mode ~= 'current' or now ~= cur))
+                    or SB.same_path(now, item.path))
+                and not (readonly and was_dirty
                     and reaper.IsProjectDirty(0) == 1) then
-            if online then
-                SB.fx_online_add(SB.fx_online_job(online, proj))
-            else
+            if online_fx then
+                SB.fx_online_add(SB.fx_online_job(online_fx, proj))
+            end
+            if readonly and reaper.GetSetProjectInfo then
                 reaper.GetSetProjectInfo(0, 'READONLY', 1, true)
             end
         end
@@ -1503,6 +1839,7 @@ function SB.open(item, mode)
         reaper.Main_OnCommand(CMD_SAVE_NEW_VERSION, 0)
     end
     if item.kind == 'template' then SB.mark_used(item.path) end
+    if item.kind == 'project' then SB.unhide_recent(item.path) end
     return true
 end
 
@@ -1800,8 +2137,9 @@ function SB.set_ui(scale, font)
     SB.style_dirty = true
 end
 
--- ReaImGui has no combined Cmd/Ctrl modifier: pick the right one per OS.
-local MOD_CMD = IS_MAC and ImGui.Mod_Super or ImGui.Mod_Ctrl
+-- ReaImGui swaps Cmd and Ctrl on macOS, so Mod_Ctrl is Cmd there and Ctrl
+-- everywhere else. Mod_Super on a Mac is the physical Control key.
+local MOD_CMD = ImGui.Mod_Ctrl
 
 local C = {}
 
@@ -1907,6 +2245,11 @@ local S = {
     dirty      = true,
     new_root   = '',
     last_key_at = 0,
+    msel       = {},      -- paths of a multi-selection (empty = just S.sel)
+    msel_n     = 0,
+    chk_offline  = false, -- detail panel checks, cleared after each open
+    chk_readonly = false,
+    chk_online   = false,
 }
 
 -- Exposed so the tests can look at the live state.
@@ -1982,6 +2325,7 @@ function SB.refilter()
     SB.restore_sel()
     if S.sel > #S.shown then S.sel = #S.shown end
     if S.sel < 1 then S.sel = 1 end
+    SB.sel_prune()
     S.dirty = false
 end
 
@@ -1989,11 +2333,95 @@ local function selected()
     return S.shown[S.sel]
 end
 
+local function sel_reset()
+    S.msel, S.msel_n = {}, 0
+end
+
 local function set_sel(index)
     S.sel = index
     S.sel_at = reaper.time_precise()
     local item = S.shown[index]
     S.sel_path = item and item.path or nil
+end
+
+-- One row, no multi-selection: what a plain click or arrow key does.
+local function select_one(index)
+    sel_reset()
+    set_sel(index)
+    S.anchor = index
+end
+
+-- Cmd/Ctrl+click: add the row to the selection, or take it out again.
+local function sel_toggle(index)
+    local item = S.shown[index]
+    if not item then return end
+    if S.msel_n == 0 then
+        local cur = selected()
+        if cur then S.msel[cur.path], S.msel_n = true, 1 end
+    end
+    if S.msel[item.path] then
+        S.msel[item.path] = nil
+        S.msel_n = S.msel_n - 1
+    else
+        S.msel[item.path] = true
+        S.msel_n = S.msel_n + 1
+    end
+    set_sel(index)
+    S.anchor = index
+    if S.msel_n < 2 then
+        -- One left is just the selection.
+        local keep = next(S.msel)
+        sel_reset()
+        if keep then
+            for j, it in ipairs(S.shown) do
+                if it.path == keep then select_one(j) break end
+            end
+        end
+    end
+end
+
+-- Shift+click and Shift+arrows: everything from the anchor to this row.
+local function sel_range(index)
+    local from = S.anchor or S.sel
+    local lo, hi = math.min(from, index), math.max(from, index)
+    sel_reset()
+    for i = lo, hi do
+        local item = S.shown[i]
+        if item then S.msel[item.path], S.msel_n = true, S.msel_n + 1 end
+    end
+    set_sel(index)
+    if S.msel_n < 2 then sel_reset() end
+end
+
+local function sel_all()
+    sel_reset()
+    if #S.shown < 2 then return end
+    for _, item in ipairs(S.shown) do S.msel[item.path] = true end
+    S.msel_n = #S.shown
+end
+
+-- The rows an action applies to, in list order.
+function SB.sel_items()
+    if S.msel_n < 2 then
+        local item = selected()
+        return item and { item } or {}
+    end
+    local out = {}
+    for _, item in ipairs(S.shown) do
+        if S.msel[item.path] then out[#out + 1] = item end
+    end
+    return out
+end
+
+-- Rows a filter or a reload took away are not selected any more.
+function SB.sel_prune()
+    if S.msel_n == 0 then return end
+    local live, n = {}, 0
+    for _, item in ipairs(S.shown) do
+        if S.msel[item.path] then live[item.path], n = true, n + 1 end
+    end
+    S.msel, S.msel_n = live, n
+    if n < 2 then sel_reset() end
 end
 
 -- After a filter or a sort the same project should stay selected.
@@ -2007,9 +2435,15 @@ function SB.restore_sel()
     end
 end
 
-local function move_sel(delta)
+local function move_sel(delta, extend)
     if #S.shown == 0 then return end
-    set_sel(math.max(1, math.min(#S.shown, S.sel + delta)))
+    local to = math.max(1, math.min(#S.shown, S.sel + delta))
+    if extend then
+        S.anchor = S.anchor or S.sel
+        sel_range(to)
+    else
+        select_one(to)
+    end
     S.scroll_to = true
 end
 
@@ -2035,21 +2469,140 @@ local function run_later()
     for _, fn in ipairs(queue) do fn() end
 end
 
+-- A REAPER dialog (Open file, a save prompt) must not find the launcher
+-- still on screen, or both sit there stuck. The window is simply not drawn
+-- for a couple of frames, then the command runs; see the loop.
 local function run_command(cmd)
+    SB.later(function() S.pending = { cmd = cmd, frames = 0 } end)
+end
+
+-- A plain open takes the two checks from the detail panel with it, and
+-- clears them: nobody should stay stuck opening everything offline.
+local function open_item(item, mode, forced)
+    if not item then return end
+    local opts = forced
+    local plain = mode == nil or mode == 'current' or mode == 'tab'
+    if item.kind == 'template' and plain and not forced then
+        if S.chk_offline then opts = { offline = true } end
+        S.chk_offline, S.chk_readonly, S.chk_online = false, false, false
+    elseif item.kind == 'project' and plain and not forced then
+        if S.chk_offline or S.chk_readonly then
+            opts = { offline = S.chk_offline, readonly = S.chk_readonly,
+                online = S.chk_offline and S.chk_online }
+        end
+        S.chk_offline, S.chk_readonly, S.chk_online = false, false, false
+    end
     SB.later(function()
-        reaper.Main_OnCommand(cmd, 0)
-        if not SB.cfg.keep_open then S.quit = true end
+        local ok, why = SB.open(item, mode, opts)
+        if ok then
+            if not SB.cfg.keep_open then S.quit = true end
+        elseif why == 'not_loaded' then
+            local _, file = SB.split_path(item.path)
+            S.dialog = {
+                title = 'Could not open this project',
+                line = file,
+                buttons = {
+                    { 'Show in folder', function()
+                        SB.later(function() SB.reveal(item.path) end)
+                    end },
+                    { 'Close' },
+                },
+            }
+        end
     end)
 end
 
+SB.MANY_ASK = 8
+SB.UNDO_SECONDS = 8
+
+-- Several projects always open in new tabs. The first one takes the empty
+-- tab REAPER starts with, if that is what is in front of the user.
+local function open_many(items, opts)
+    opts = opts or {}
+    local list = {}
+    for _, item in ipairs(items) do
+        if not item.missing then list[#list + 1] = item end
+    end
+    if #list == 0 then
+        set_status('Nothing to open')
+        return
+    end
+    local function go()
+        SB.later(function()
+            local opened, failed = 0, 0
+            for n, item in ipairs(list) do
+                local first = n == 1 and SB.current_tab_empty()
+                local ok = SB.open(item, first and 'current' or 'tab', {
+                    offline = opts.offline, readonly = opts.readonly,
+                    online = opts.online })
+                if ok then opened = opened + 1 else failed = failed + 1 end
+            end
+            if failed > 0 then
+                set_status(('Could not open %d of %d'):format(failed, #list))
+            end
+            if opened > 0 and not SB.cfg.keep_open then S.quit = true end
+        end)
+    end
+    if #list > SB.MANY_ASK then
+        S.dialog = {
+            title = ('Open %d projects?'):format(#list),
+            line = 'Each one opens in its own tab.',
+            buttons = { { ('Open %d'):format(#list), go, primary = true },
+                { 'Cancel' } },
+        }
+    else
+        go()
+    end
+end
+
 local function do_open(mode)
-    local item = selected()
-    if not item then return end
-    SB.later(function()
-        if SB.open(item, mode) and not SB.cfg.keep_open then
-            S.quit = true
+    if S.msel_n > 1 then
+        open_many(SB.sel_items())
+        return
+    end
+    open_item(selected(), mode)
+end
+
+-- Taking projects out of Recent. They stay in REAPER's own list.
+local function remove_recent(items)
+    local list = {}
+    for _, item in ipairs(items) do
+        if item.kind == 'project' then list[#list + 1] = item end
+    end
+    if SB.hide_recent(list) == 0 then return end
+    local paths = {}
+    for i, item in ipairs(list) do paths[i] = item.path end
+    S.undo = {
+        paths = paths, at = reaper.time_precise(),
+        label = #list == 1 and list[1].name or ('%d projects'):format(#list),
+    }
+    sel_reset()
+    S.sel_path = nil
+    SB.reload('recent')
+end
+
+local function undo_remove()
+    local undo = S.undo
+    if not undo then return end
+    for _, path in ipairs(undo.paths) do SB.unhide_recent(path) end
+    S.undo = nil
+    SB.reload('recent')
+end
+
+local function restore_removed()
+    SB.unhide_all()
+    S.undo = nil
+    SB.reload('recent')
+end
+
+-- Favorites for a whole selection: all of them on, or all of them off.
+local function fav_many(items, want)
+    for _, item in ipairs(items) do
+        if (SB.fav_set[item.path] and true or false) ~= want then
+            SB.fav_toggle(item.path)
         end
-    end)
+    end
+    S.dirty = true
 end
 
 ------------------------------------------------------------------------------
@@ -2057,6 +2610,17 @@ end
 ------------------------------------------------------------------------------
 
 local ctx = ImGui.CreateContext(SB.NAME)
+
+-- ReaImGui drops a context that goes unused for a while, which is what
+-- happens while the launcher sits in the background waiting for a new tab.
+-- A fresh one is made when the window comes back.
+function SB.new_context()
+    ctx = ImGui.CreateContext(SB.NAME)
+    SB.ctx_made = (SB.ctx_made or 0) + 1
+    SB.clipper = ImGui.CreateListClipper(ctx)
+    ImGui.Attach(ctx, SB.clipper)
+    ImGui.SetConfigVar(ctx, ImGui.ConfigVar_WindowsMoveFromTitleBarOnly, 0)
+end
 
 -- Hovering a control writes a line for the status bar rather than opening a
 -- tooltip under the pointer. The bar is already there, it never covers the
@@ -2171,7 +2735,9 @@ end
 -- the mistake that caused it. Catching it here keeps the window stack sane
 -- and prints what actually happened, once.
 function SB.guard(what, fn)
+    local mark = #SB.scopes
     local ok, err = xpcall(fn, debug.traceback)
+    if not ok then SB.unwind(mark) end
     if not ok and not SB.reported then
         SB.reported = true
         reaper.ShowConsoleMsg(('Project Launcher %s hit an error in %s.\nPlease send '
@@ -2744,6 +3310,7 @@ local function draw_rail(height)
                 or SB.main_open() == 'tab' and 'new tab' or 'open'),
             SHORTCUT .. 'Enter  '
                 .. (SB.alt_open() == 'tab' and 'new tab' or 'current tab'),
+            'Middle click  new tab',
             SHORTCUT .. 'F  search',
             SHORTCUT .. 'D  favorite',
             'Esc  ' .. (S.query ~= '' and 'clear search' or 'close'),
@@ -2860,6 +3427,38 @@ end
 local function list_font()
     ImGui.PopFont(ctx)
     ImGui.PushFont(ctx, nil, LFS(BASE_FONT))
+end
+
+-- The context menu for a selection of several rows.
+local function draw_multi_menu()
+    local items = SB.sel_items()
+    local n = #items
+    if ImGui.MenuItem(ctx, ('Open %d in new tabs'):format(n)) then
+        open_many(items)
+    end
+    ImGui.Separator(ctx)
+    if ImGui.MenuItem(ctx, 'Open with FX offline') then
+        open_many(items, { offline = true })
+    end
+    if items[1] and items[1].kind ~= 'template'
+            and ImGui.MenuItem(ctx, 'Open read-only') then
+        open_many(items, { readonly = true })
+    end
+    ImGui.Separator(ctx)
+    local all = true
+    for _, item in ipairs(items) do
+        if not SB.fav_set[item.path] then all = false end
+    end
+    if ImGui.MenuItem(ctx, all and 'Remove from favorites'
+            or 'Add to favorites') then
+        fav_many(items, not all)
+    end
+    if S.view == 'recent' then
+        ImGui.Separator(ctx)
+        if ImGui.MenuItem(ctx, 'Remove from Recent', 'Delete') then
+            SB.later(function() remove_recent(items) end)
+        end
+    end
 end
 
 local function draw_list(width, height)
@@ -3046,7 +3645,8 @@ local function draw_list(width, height)
                         local star_cx = star_x + cell_w / 2
                         local sel_flags = ImGui.SelectableFlags_SpanAllColumns |
                             ImGui.SelectableFlags_AllowDoubleClick
-                        if ImGui.Selectable(ctx, '##' .. item.path, S.sel == i,
+                        local is_sel = S.sel == i or S.msel[item.path] ~= nil
+                        if ImGui.Selectable(ctx, '##' .. item.path, is_sel,
                                 sel_flags) then
                             -- A click on the star toggles instead of selecting.
                             -- the whole first column counts as the star
@@ -3055,15 +3655,27 @@ local function draw_list(width, height)
                                 SB.fav_toggle(item.path)
                                 S.dirty = true
                             else
-                                set_sel(i)
-                                if ImGui.IsMouseDoubleClicked(ctx, 0) then
-                                    do_open(ImGui.GetKeyMods(ctx) & MOD_CMD ~= 0
-                                        and SB.alt_open() or SB.main_open())
+                                local mods = ImGui.GetKeyMods(ctx)
+                                if mods & MOD_CMD ~= 0 then
+                                    sel_toggle(i)
+                                elseif mods & ImGui.Mod_Shift ~= 0 then
+                                    sel_range(i)
+                                else
+                                    select_one(i)
+                                    if ImGui.IsMouseDoubleClicked(ctx, 0) then
+                                        do_open(SB.main_open())
+                                    end
                                 end
                             end
                         end
                         local row_hot = ImGui.IsItemHovered(ctx)
-                        if S.sel == i then
+                        -- Middle click always means a new tab, whatever
+                        -- Settings says about Enter.
+                        if ImGui.IsItemClicked(ctx, ImGui.MouseButton_Middle) then
+                            select_one(i)
+                            open_item(item, 'tab')
+                        end
+                        if is_sel then
                             local line_h = ImGui.GetTextLineHeight(ctx)
                             ImGui.DrawList_AddRectFilled(dl,
                                 star_x - PX(CELL_PAD_X), star_y - PX(3),
@@ -3078,8 +3690,15 @@ local function draw_list(width, height)
                         end
 
                         push_menu_style()
-                        if ImGui.BeginPopupContextItem(ctx) then
-                            set_sel(i)
+                        if S.msel_n > 1 and S.msel[item.path] then
+                            -- Right click inside a selection acts on all of it.
+                            if ImGui.BeginPopupContextItem(ctx) then
+                                draw_multi_menu()
+                                ImGui.EndPopup(ctx)
+                                list_font()
+                            end
+                        elseif ImGui.BeginPopupContextItem(ctx) then
+                            select_one(i)
                             local main_label, alt_label = open_labels()
                             if ImGui.MenuItem(ctx, main_label) then
                                 do_open(SB.main_open())
@@ -3102,6 +3721,9 @@ local function draw_list(width, height)
                                     do_open('readonly')
                                 end
                             elseif item.kind == 'template' then
+                                if ImGui.MenuItem(ctx, 'Open with FX offline') then
+                                    do_open('offline')
+                                end
                                 if ImGui.MenuItem(ctx, 'Edit template file') then
                                     do_open('edit')
                                 end
@@ -3143,6 +3765,13 @@ local function draw_list(width, height)
                             if ImGui.MenuItem(ctx, 'Show in folder') then
                                 SB.later(function() SB.reveal(item.path) end)
                             end
+                            if S.view == 'recent' and item.kind == 'project' then
+                                ImGui.Separator(ctx)
+                                if ImGui.MenuItem(ctx, 'Remove from Recent',
+                                        'Delete') then
+                                    SB.later(function() remove_recent({ item }) end)
+                                end
+                            end
                             ImGui.EndPopup(ctx)
                             -- the popup ate the pushed size again
                             list_font()
@@ -3172,7 +3801,7 @@ local function draw_list(width, height)
                         if ImGui.TableSetColumnIndex(ctx, 2) then
                             if item.missing then
                                 ImGui.TextColored(ctx, C.warn, '! ' .. item.name)
-                            elseif S.sel == i then
+                            elseif is_sel then
                                 ImGui.TextColored(ctx, C.accent, item.name)
                             else
                                 ImGui.TextColored(ctx, C.text_bright, item.name)
@@ -3238,11 +3867,165 @@ local function kv(key, value)
     ImGui.TextColored(ctx, C.text, value)
 end
 
+-- The panel while several rows are selected.
+local function draw_multi_detail()
+    local items = SB.sel_items()
+    local n = #items
+    local tpl = items[1] and items[1].kind == 'template'
+    local rows = S.view == 'recent' and 3 or 2
+    local avail_h = select(2, ImGui.GetContentRegionAvail(ctx))
+    local gap = select(2, ImGui.GetStyleVar(ctx, ImGui.StyleVar_ItemSpacing))
+    local buttons_h = ImGui.GetFrameHeight(ctx) * rows + gap * (rows - 1)
+    local info_h = avail_h - buttons_h - gap
+
+    local room = info_h > ImGui.GetTextLineHeight(ctx)
+    if room and ImGui.BeginChild(ctx, 'selected', 0, info_h) then
+        ImGui.PushFont(ctx, nil, FS(15))
+        ImGui.TextWrapped(ctx, ('%d %s selected'):format(n,
+            tpl and 'templates' or 'projects'))
+        ImGui.PopFont(ctx)
+        ImGui.Dummy(ctx, 1, PX(4))
+        ImGui.Separator(ctx)
+        ImGui.Dummy(ctx, 1, PX(2))
+        local w = ImGui.GetContentRegionAvail(ctx)
+        for _, item in ipairs(items) do
+            ImGui.TextColored(ctx, C.text_dim, SB.fit_text(item.name, w))
+        end
+    end
+    if room then ImGui.EndChild(ctx) end
+
+    ImGui.PushStyleColor(ctx, ImGui.Col_Button, C.accent_dim)
+    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, C.accent_soft)
+    ImGui.PushStyleColor(ctx, ImGui.Col_Text, C.accent)
+    if ImGui.Button(ctx, ('Open %d in new tabs'):format(n), -1) then
+        open_many(items)
+    end
+    hint('Enter')
+    ImGui.PopStyleColor(ctx, 3)
+
+    local all = true
+    for _, item in ipairs(items) do
+        if not SB.fav_set[item.path] then all = false end
+    end
+    if ImGui.Button(ctx, all and 'Remove from favorites' or 'Add to favorites',
+            -1) then
+        fav_many(items, not all)
+    end
+    hint(SHORTCUT .. 'D')
+    if S.view == 'recent' then
+        if ImGui.Button(ctx, 'Remove from Recent', -1) then
+            SB.later(function() remove_recent(items) end)
+        end
+        hint('Delete. Stays in File > Recent projects')
+    end
+end
+
+-- One row that opens something: the label on the left, a count on the right.
+local function link_row(key, value, id)
+    local w = ImGui.GetWindowWidth(ctx)
+    local tw = ImGui.CalcTextSize(ctx, value)
+    ImGui.PushStyleColor(ctx, ImGui.Col_Text, C.text_faint)
+    local hit = ImGui.Selectable(ctx, key .. '##' .. id)
+    ImGui.PopStyleColor(ctx)
+    ImGui.SameLine(ctx, w - tw - PX(16))
+    ImGui.TextColored(ctx, C.accent, value)
+    return hit
+end
+
+-- The panel while the list of a project's backups is showing.
+local function draw_backups(item)
+    local list = SB.backups_of(item.path)
+    local bk = S.bk
+    local chosen
+    if bk.sel > #list then bk.sel = math.max(1, #list) end
+    local avail_h = select(2, ImGui.GetContentRegionAvail(ctx))
+    local gap = select(2, ImGui.GetStyleVar(ctx, ImGui.StyleVar_ItemSpacing))
+    local buttons_h = ImGui.GetFrameHeight(ctx)
+    local info_h = avail_h - buttons_h - gap
+
+    local room = info_h > ImGui.GetTextLineHeight(ctx)
+    if room and ImGui.BeginChild(ctx, 'backups', 0, info_h) then
+        if ImGui.SmallButton(ctx, 'Back') then S.bk = nil end
+        ImGui.PushFont(ctx, nil, FS(15))
+        ImGui.TextWrapped(ctx, item.name)
+        ImGui.PopFont(ctx)
+        ImGui.TextColored(ctx, C.text_faint,
+            ('%d %s'):format(#list, #list == 1 and 'backup' or 'backups'))
+        ImGui.Dummy(ctx, 1, PX(2))
+        ImGui.Separator(ctx)
+        ImGui.Dummy(ctx, 1, PX(2))
+        local w = ImGui.GetWindowWidth(ctx)
+        for i, e in ipairs(list) do
+            if e.size == nil then e.size = SB.file_size(e.path) or false end
+            local label = SB.when_label(e.t)
+            if ImGui.Selectable(ctx, label .. '##bk' .. i, bk.sel == i,
+                    ImGui.SelectableFlags_AllowDoubleClick) then
+                bk.sel = i
+                if ImGui.IsMouseDoubleClicked(ctx, 0) then bk.open = true end
+            end
+            push_menu_style()
+            if ImGui.BeginPopupContextItem(ctx) then
+                bk.sel = i
+                if ImGui.MenuItem(ctx, 'Open in new tab') then
+                    chosen = { e, 'tab' }
+                end
+                if ImGui.MenuItem(ctx, 'Open in current tab') then
+                    chosen = { e, 'current' }
+                end
+                ImGui.Separator(ctx)
+                if ImGui.MenuItem(ctx, 'Open with FX offline') then
+                    chosen = { e, 'tab', true }
+                end
+                if ImGui.MenuItem(ctx, 'Bring FX online after load') then
+                    chosen = { e, 'tab', true, true }
+                end
+                ImGui.Separator(ctx)
+                if ImGui.MenuItem(ctx, 'Show in folder') then
+                    local path = e.path
+                    SB.later(function() SB.reveal(path) end)
+                end
+                ImGui.EndPopup(ctx)
+            end
+            pop_menu_style()
+            local size = e.size and SB.human_size(e.size) or ''
+            ImGui.SameLine(ctx, w - ImGui.CalcTextSize(ctx, size) - PX(16))
+            ImGui.TextColored(ctx, C.text_faint, size)
+        end
+    end
+    if room then ImGui.EndChild(ctx) end
+
+    ImGui.PushStyleColor(ctx, ImGui.Col_Button, C.accent_dim)
+    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, C.accent_soft)
+    ImGui.PushStyleColor(ctx, ImGui.Col_Text, C.accent)
+    local go = ImGui.Button(ctx, 'Open in new tab', -1)
+    ImGui.PopStyleColor(ctx, 3)
+    hint('Opens read-only, so the backup is never overwritten')
+    local e = list[bk.sel]
+    if (go or bk.open) and e then chosen = { e, 'tab' } end
+    if chosen then
+        -- Every way in stays read-only: a backup is never saved over.
+        local _, file = SB.split_path(chosen[1].path)
+        open_item({ kind = 'project', path = chosen[1].path, name = file },
+            chosen[2], { readonly = true, noverify = true,
+                offline = chosen[3], online = chosen[4] })
+    end
+    bk.open = nil
+end
+
 local function draw_detail(width, height)
     panel('detail', width, height, PX(12), PX(9), function()
+        if S.msel_n > 1 then
+            draw_multi_detail()
+            return
+        end
         local item = selected()
         if not item then
             ImGui.TextColored(ctx, C.text_dim, 'Nothing selected.')
+            return
+        end
+        if S.bk and S.bk.path ~= item.path then S.bk = nil end
+        if S.bk then
+            draw_backups(item)
             return
         end
 
@@ -3257,6 +4040,21 @@ local function draw_detail(width, height)
         -- row underneath: two rows instead of four, which is most of the
         -- height the track list needed.
         local rows = tpl and 2 or 4
+        -- Two checks and a third that follows FX offline, above the buttons.
+        -- Side by side when the panel is wide enough, else one to a line.
+        local checks = item.kind == 'project' or tpl
+        local space_x = ImGui.GetStyleVar(ctx, ImGui.StyleVar_ItemSpacing)
+        local box = ImGui.GetFrameHeight(ctx)
+        local one_line = false
+        if checks then
+            local need = box * 2 + space_x * 3
+                + ImGui.CalcTextSize(ctx, 'FX offline')
+                + ImGui.CalcTextSize(ctx, 'Read-only')
+            one_line = need <= ImGui.GetContentRegionAvail(ctx)
+            -- A template opens as a new project: nothing to lock, and no
+            -- saved FX state to bring back. FX offline is its only check.
+            rows = rows + (tpl and 1 or one_line and 2 or 3)
+        end
         local buttons_h = ImGui.GetFrameHeight(ctx) * rows + gap * (rows - 1)
         local info_h    = avail_h - buttons_h - gap
 
@@ -3333,6 +4131,17 @@ local function draw_detail(width, height)
                     if meta.length and meta.length > 0 then
                         kv('Length', SB.human_time(meta.length))
                     end
+                    -- Only listed once the row has settled, and cached per
+                    -- project, so moving through the list never lists a folder
+                    -- more than once.
+                    local backups = item.kind == 'project'
+                        and SB.backups_of(item.path) or {}
+                    if #backups > 0 then
+                        if link_row('Backups', tostring(#backups), 'bk') then
+                            S.bk = { path = item.path, sel = 1 }
+                        end
+                        hint('Shows the saved backups of this project')
+                    end
                     end
 
 
@@ -3393,6 +4202,27 @@ local function draw_detail(width, height)
         end
         if room then ImGui.EndChild(ctx) end
 
+        if checks then
+            local rv1, off = ImGui.Checkbox(ctx, 'FX offline', S.chk_offline)
+            if rv1 then
+                S.chk_offline = off
+                if not off then S.chk_online = false end
+            end
+            hint('Loads every plug-in offline. For a project that crashes')
+            if not tpl then
+                if one_line then ImGui.SameLine(ctx) end
+                local rv2, ro = ImGui.Checkbox(ctx, 'Read-only', S.chk_readonly)
+                if rv2 then S.chk_readonly = ro end
+                hint('Opens it locked, so nothing can be saved over it')
+                ImGui.BeginDisabled(ctx, not S.chk_offline)
+                local rv3, on = ImGui.Checkbox(ctx, 'Bring online after load',
+                    S.chk_offline and S.chk_online)
+                if rv3 then S.chk_online = on end
+                ImGui.EndDisabled(ctx)
+                hint('Needs FX offline. The plug-ins come back once it has loaded')
+            end
+        end
+
         ImGui.PushStyleColor(ctx, ImGui.Col_Button, C.accent_dim)
         ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, C.accent_soft)
         ImGui.PushStyleColor(ctx, ImGui.Col_Text, C.accent)
@@ -3440,8 +4270,12 @@ local function draw_status()
     ImGui.PushFont(ctx, nil, FS(11))
     local shown, total = #S.shown, #S.items
     local text
+    local undoing = S.undo and not S.hint
+        and reaper.time_precise() - S.undo.at < SB.UNDO_SECONDS
     if S.hint and S.hint ~= '' then
         text = S.hint
+    elseif undoing then
+        text = 'Removed ' .. S.undo.label
     elseif SB.scan.running then
         text = ('Scanning: %d folders, %d projects found')
             :format(SB.scan.dirs, #SB.scan.found)
@@ -3453,7 +4287,11 @@ local function draw_status()
     else
         text = ('%d of %d'):format(shown, total)
     end
-    if not S.hint and SB.cfg.hide_missing and S.view == 'recent' then
+    if not S.hint and not undoing and S.msel_n > 1 then
+        text = ('%s   %d selected'):format(text, S.msel_n)
+    end
+    if not S.hint and not undoing and SB.cfg.hide_missing
+            and S.view == 'recent' then
         local gone = 0
         for _, item in ipairs(S.items) do
             if item.missing then gone = gone + 1 end
@@ -3461,6 +4299,14 @@ local function draw_status()
         if gone > 0 then
             text = ('%s   %d missing hidden'):format(text, gone)
         end
+    end
+    -- Clickable words at the end of the line: Undo right after a removal,
+    -- then how many are out of the list, to bring them back.
+    local link
+    if undoing then
+        link = 'Undo'
+    elseif not S.hint and S.view == 'recent' and (SB.removed_n or 0) > 0 then
+        link = ('%d removed'):format(SB.removed_n)
     end
     -- SameLine takes an absolute offset, so a status line wider than the
     -- space left over would make the cursor jump backwards and the size
@@ -3470,13 +4316,24 @@ local function draw_status()
         + ImGui.CalcTextSize(ctx, '-') + ImGui.CalcTextSize(ctx, '+')
         + ImGui.CalcTextSize(ctx, pct)
         + ImGui.CalcTextSize(ctx, 'A') * (10 / 12 + 16 / 12)
-    text = SB.fit_text(text, content_w - bar_w - PX(10))
+    local link_w = link and (ImGui.CalcTextSize(ctx, link) + PX(16)) or 0
+    text = SB.fit_text(text, content_w - bar_w - PX(10) - link_w)
     -- The buttons on the right are frame-height; the text is not. Drop it
     -- by half the difference so the whole row reads as one line.
     local drop = (ImGui.GetFrameHeight(ctx) - ImGui.GetTextLineHeight(ctx)) / 2
     local text_y = ImGui.GetCursorPosY(ctx)
     ImGui.SetCursorPosY(ctx, text_y + drop)
     ImGui.TextColored(ctx, C.text_faint, text)
+    if link then
+        ImGui.SameLine(ctx, 0, PX(12))
+        ImGui.PushStyleColor(ctx, ImGui.Col_Button, C.clear)
+        ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered, C.clear)
+        ImGui.PushStyleColor(ctx, ImGui.Col_Text, C.accent)
+        if ImGui.SmallButton(ctx, link .. '##restore') then
+            SB.later(undoing and undo_remove or restore_removed)
+        end
+        ImGui.PopStyleColor(ctx, 3)
+    end
     ImGui.SetCursorPosY(ctx, text_y)
 
     ImGui.PopFont(ctx)
@@ -3597,6 +4454,14 @@ local function settings_general()
         set_bool('skip_if_open', skip)
     end
     hint('REAPER reopening your last project counts as already opened')
+
+    local rvw, watch = ImGui.Checkbox(ctx, 'Show on every new empty tab',
+        SB.cfg.watch_tabs)
+    if rvw then
+        SB.cfg.watch_tabs = watch
+        set_bool('watch_tabs', watch)
+    end
+    hint('Stays in the background once closed. Run it again to bring it back')
 
     if SB.startup_prompt_conflict() then
         ImGui.Dummy(ctx, 1, PX(2))
@@ -3832,7 +4697,61 @@ local function settings_popup()
     ImGui.EndPopup(ctx)
 end
 
+-- A small message with a few buttons, on top of the window. Escape and
+-- clicking any button close it.
+local function draw_dialog()
+    local d = S.dialog
+    if not d then return end
+    local id = 'Project Launcher##dialog'
+    if not d.shown then
+        ImGui.OpenPopup(ctx, id)
+        d.shown = true
+    end
+    if S.win_x then
+        ImGui.SetNextWindowPos(ctx, S.win_x + (S.win_w or 0) / 2,
+            S.win_y + (S.win_h or 0) / 2, ImGui.Cond_Appearing, 0.5, 0.5)
+    end
+    ImGui.SetNextWindowSizeConstraints(ctx, PX(330), 0, PX(330), 6000)
+    ImGui.PushStyleVar(ctx, ImGui.StyleVar_WindowPadding, PX(16), PX(14))
+    local open = ImGui.BeginPopupModal(ctx, id, nil,
+        ImGui.WindowFlags_AlwaysAutoResize | ImGui.WindowFlags_NoTitleBar)
+    ImGui.PopStyleVar(ctx)
+    if not open then
+        S.dialog = nil
+        return
+    end
+
+    ImGui.TextColored(ctx, C.text_bright, d.title)
+    if d.line then
+        ImGui.Dummy(ctx, 1, PX(2))
+        ImGui.TextColored(ctx, C.text_dim, SB.fit_text(d.line,
+            ImGui.GetContentRegionAvail(ctx)))
+    end
+    ImGui.Dummy(ctx, 1, PX(6))
+    local done = ImGui.IsKeyPressed(ctx, ImGui.Key_Escape)
+    for n, b in ipairs(d.buttons) do
+        if n > 1 then ImGui.SameLine(ctx) end
+        if b.primary then
+            ImGui.PushStyleColor(ctx, ImGui.Col_Button, C.accent_dim)
+            ImGui.PushStyleColor(ctx, ImGui.Col_Text, C.accent)
+        end
+        local hit = ImGui.Button(ctx, b[1])
+        if b.primary then ImGui.PopStyleColor(ctx, 2) end
+        if hit then
+            if b[2] then b[2]() end
+            done = true
+        end
+    end
+    if done then
+        ImGui.CloseCurrentPopup(ctx)
+        S.dialog = nil
+    end
+    ImGui.EndPopup(ctx)
+end
+
 local function handle_keys()
+    -- A dialog owns the keyboard until it is answered.
+    if S.dialog then return end
     -- While the settings dialog is up, or a section is being named, the
     -- keys belong there: Enter would otherwise open a project and Escape
     -- would close the window out from under the field.
@@ -3850,14 +4769,30 @@ local function handle_keys()
         return
     end
 
-    if ImGui.IsKeyPressed(ctx, ImGui.Key_DownArrow) then move_sel(1) end
-    if ImGui.IsKeyPressed(ctx, ImGui.Key_UpArrow) then move_sel(-1) end
-    if ImGui.IsKeyPressed(ctx, ImGui.Key_PageDown) then move_sel(10) end
-    if ImGui.IsKeyPressed(ctx, ImGui.Key_PageUp) then move_sel(-10) end
-    if ImGui.IsKeyPressed(ctx, ImGui.Key_Home) then move_sel(-#S.shown) end
-    if ImGui.IsKeyPressed(ctx, ImGui.Key_End) then move_sel(#S.shown) end
-
     local mods = ImGui.GetKeyMods(ctx)
+
+    -- Cmd/Ctrl+W closes everywhere. Super+Q too, on Linux only: on a Mac
+    -- Cmd+Q quits REAPER itself, so Q is never looked at there.
+    if mods & MOD_CMD ~= 0 and ImGui.IsKeyPressed(ctx, ImGui.Key_W) then
+        S.quit = true
+        return
+    end
+    if IS_LINUX and mods & ImGui.Mod_Super ~= 0
+            and ImGui.IsKeyPressed(ctx, ImGui.Key_Q) then
+        S.quit = true
+        return
+    end
+
+    local extend = mods & ImGui.Mod_Shift ~= 0
+    if ImGui.IsKeyPressed(ctx, ImGui.Key_DownArrow) then move_sel(1, extend) end
+    if ImGui.IsKeyPressed(ctx, ImGui.Key_UpArrow) then move_sel(-1, extend) end
+    if ImGui.IsKeyPressed(ctx, ImGui.Key_PageDown) then move_sel(10, extend) end
+    if ImGui.IsKeyPressed(ctx, ImGui.Key_PageUp) then move_sel(-10, extend) end
+    if ImGui.IsKeyPressed(ctx, ImGui.Key_Home) then
+        move_sel(-#S.shown, extend)
+    end
+    if ImGui.IsKeyPressed(ctx, ImGui.Key_End) then move_sel(#S.shown, extend) end
+
     local enter = ImGui.IsKeyPressed(ctx, ImGui.Key_Enter) or
         ImGui.IsKeyPressed(ctx, ImGui.Key_KeypadEnter)
     if enter then
@@ -3870,8 +4805,16 @@ local function handle_keys()
         end
     end
 
+    -- With text in the search box, Delete belongs to the box.
+    if ImGui.IsKeyPressed(ctx, ImGui.Key_Delete) and S.query == ''
+            and S.view == 'recent' then
+        local items = SB.sel_items()
+        SB.later(function() remove_recent(items) end)
+    end
+
     if ImGui.IsKeyPressed(ctx, ImGui.Key_F5) then
         SB.meta_cache = {}
+        SB.bk_dirs = {}
         SB.reload()
         set_status('Refreshed')
     end
@@ -3885,10 +4828,18 @@ local function handle_keys()
             S.focus_search = true
         elseif ImGui.IsKeyPressed(ctx, ImGui.Key_Comma) then
             S.show_settings = true
+        elseif ImGui.IsKeyPressed(ctx, ImGui.Key_A) and S.query == '' then
+            sel_all()
         elseif ImGui.IsKeyPressed(ctx, ImGui.Key_D) then
-            local item = selected()
-            if item then
-                SB.fav_toggle(item.path)
+            local items = SB.sel_items()
+            if #items > 1 then
+                local all = true
+                for _, item in ipairs(items) do
+                    if not SB.fav_set[item.path] then all = false end
+                end
+                fav_many(items, not all)
+            elseif items[1] then
+                SB.fav_toggle(items[1].path)
                 S.dirty = true
             end
         end
@@ -3986,6 +4937,7 @@ function SB.frame()
 
     draw_settings()
     settings_popup()
+    draw_dialog()
 
     -- Cleared last, not first: the size buttons at the bottom right are
     -- submitted after draw_status, and wiping it at the top of the frame
@@ -4031,25 +4983,159 @@ local function fx_job_window()
     if done or cancel then SB.fx_job = nil end
 end
 
-local function loop()
+-- Waiting in the background for a new empty tab (Settings > Show on every
+-- new empty tab). Once every half second it looks at the tab list: a tab it
+-- has not seen, still blank a moment later and in front, brings the window
+-- back. A tab that loads something, or that this script made, is let go.
+SB.WATCH_EVERY = 0.5
+-- A heartbeat this fresh means another instance is alive. Generous on
+-- purpose: REAPER can stall for seconds (a dialog, a project load) without
+-- the running instance being gone.
+SB.ALIVE_WINDOW = 6
+
+local function tab_is_blank(proj, path)
+    return (path or '') == '' and reaper.IsProjectDirty(proj) == 0
+        and reaper.CountTracks(proj) == 0
+end
+
+function SB.watch_reset()
+    SB.tabs_known, SB.tabs_new = {}, {}
+    local i = 0
+    while true do
+        local proj = reaper.EnumProjects(i)
+        if not proj then break end
+        SB.tabs_known[proj] = true
+        i = i + 1
+    end
+end
+
+-- True when the launcher should show up.
+function SB.watch_step(now)
+    local known, fresh = SB.tabs_known, SB.tabs_new
+    local live, fire = {}, false
+    local cur = reaper.EnumProjects(-1)
+    local i = 0
+    while true do
+        local proj, path = reaper.EnumProjects(i)
+        if not proj then break end
+        live[proj] = true
+        if not known[proj] then
+            if now < (SB.own_until or 0) or not tab_is_blank(proj, path) then
+                known[proj], fresh[proj] = true, nil
+            elseif not fresh[proj] then
+                fresh[proj] = now
+            elseif proj == cur then
+                known[proj], fresh[proj] = true, nil
+                fire = true
+            end
+        end
+        i = i + 1
+    end
+    for proj in pairs(known) do if not live[proj] then known[proj] = nil end end
+    for proj in pairs(fresh) do if not live[proj] then fresh[proj] = nil end end
+    return fire
+end
+
+local function show_again()
+    SB.new_context()
+    S.quit, S.dialog, S.pending, S.in_bg = false, nil, nil, nil
+    S.show_settings, S.query, S.focus_search = false, '', true
+    sel_reset()
+    S.sel, S.sel_path = 1, nil
+    SB.reload(S.view)
+    -- The window is up: running the action again closes it, as always.
+    if reaper.set_action_options then reaper.set_action_options(1 | 4) end
+end
+
+local loop
+
+-- Window closed, watcher on: stay alive and cheap. Running the action again
+-- must bring the window back. Flag 2 alone does not start a new instance on
+-- REAPER 7.83, so this uses 1|2: REAPER ends this instance and starts a fresh
+-- one, which opens the window like any manual run. 4 keeps the toggle on.
+local function background()
+    if not S.in_bg then
+        S.in_bg = true
+        SB.watch_reset()
+        S.bg_next = 0
+        if reaper.set_action_options then reaper.set_action_options(1 | 2 | 4) end
+    end
+    local now = reaper.time_precise()
+    if now < S.bg_next then return end
+    S.bg_next = now + SB.WATCH_EVERY
+    reaper.SetExtState(SB.EXTNAME, 'heartbeat', tostring(now), false)
+    local asked = reaper.GetExtState(SB.EXTNAME, 'show_ui') == '1'
+    if asked then reaper.DeleteExtState(SB.EXTNAME, 'show_ui', false) end
+    if SB.watch_step(now) or asked then show_again() end
+end
+
+-- The window stays away for two frames, so ReaImGui has really taken it off
+-- the screen, then the command runs. With Keep the window open on, the loop
+-- carries on from inside the dialog (a second chain is started first) but
+-- draws nothing until the command comes back.
+local function step_pending()
+    S.pending.frames = S.pending.frames + 1
+    if S.pending.frames < 2 then
+        reaper.defer(loop)
+        return
+    end
+    local cmd = S.pending.cmd
+    S.pending = nil
+    SB.own_tab()
+    if SB.cfg.keep_open or SB.cfg.watch_tabs then
+        -- The watcher keeps the script alive either way; without Keep the
+        -- window open it just stays closed once the command is done.
+        S.away = true
+        reaper.defer(loop)
+        reaper.Main_OnCommand(cmd, 0)
+        S.away = false
+        if not SB.cfg.keep_open then S.quit = true end
+    else
+        S.quit = true
+        reaper.Main_OnCommand(cmd, 0)
+    end
+end
+
+loop = function()
     if S.quit then
         -- Main window closed with FX still coming online: only the
         -- progress window is left.
-        if SB.fx_job then fx_job_window() end
+        if SB.fx_job then SB.guard('progress', fx_job_window) end
+        if SB.cfg.watch_tabs and not SB.reported then
+            background()
+            reaper.defer(loop)
+            return
+        end
         if SB.fx_job then reaper.defer(loop) end
         return
     end
 
     reaper.SetExtState(SB.EXTNAME, 'heartbeat',
         tostring(reaper.time_precise()), false)
+
+    if S.pending or S.away then
+        if S.pending then step_pending() else reaper.defer(loop) end
+        return
+    end
+
     if reaper.GetExtState(SB.EXTNAME, 'show_ui') == '1' then
         reaper.DeleteExtState(SB.EXTNAME, 'show_ui', false)
         ImGui.SetNextWindowFocus(ctx)
     end
 
+    -- The context can be dropped while a dialog was up (Keep the window
+    -- open) and nothing drew for a while. Make a new one before using it.
+    local validate = rawget(ImGui, 'ValidatePtr')
+    if validate and not validate(ctx, 'ImGui_Context*') then
+        SB.new_context()
+    end
+
     push_style()
-    ImGui.SetNextWindowSize(ctx, math.min(PX(940), 1500),
-        math.min(PX(580), 950), ImGui.Cond_FirstUseEver)
+    ImGui.SetNextWindowSize(ctx, S.win_w or math.min(PX(940), 1500),
+        S.win_h or math.min(PX(580), 950), ImGui.Cond_FirstUseEver)
+    if S.win_x then
+        ImGui.SetNextWindowPos(ctx, S.win_x, S.win_y, ImGui.Cond_FirstUseEver)
+    end
     -- Deliberately NOT scaled. A minimum of PX(640) is 1280 at 200%, which
     -- is the whole screen on a 1280-wide laptop - and since ImGui pushes a
     -- window up to the minimum but never back down, that trap would stick
@@ -4080,9 +5166,9 @@ local function loop()
     ImGui.End(ctx)
     pop_style()
     SB.guard('open', run_later)
-    if SB.fx_job then fx_job_window() end
+    if SB.fx_job then SB.guard('progress', fx_job_window) end
 
-    if not S.quit or SB.fx_job then
+    if not S.quit or SB.fx_job or SB.cfg.watch_tabs then
         reaper.defer(loop)
     end
 end
@@ -4114,7 +5200,11 @@ function SB.main()
     -- Launched from __startup.lua with a project already loaded? Stay away.
     if SB.cfg.skip_if_open and SB.launched_at_startup then
         local _, name = reaper.EnumProjects(0)
-        if name and name ~= '' then return end
+        if name and name ~= '' then
+            -- No window now, but with the watcher on the script stays.
+            if not SB.cfg.watch_tabs then return end
+            S.quit = true
+        end
     end
 
     -- The UI loop is really starting now, so light up the toolbar toggle.
@@ -4148,7 +5238,7 @@ if LAUNCHER_TEST then return SB end
 -- the front instead. On 7.03+ REAPER terminates the running instance first,
 -- so this branch is the old-REAPER fallback only.
 local beat = tonumber(reaper.GetExtState(SB.EXTNAME, 'heartbeat'))
-if beat and reaper.time_precise() - beat < 2 then
+if beat and reaper.time_precise() - beat < SB.ALIVE_WINDOW then
     reaper.SetExtState(SB.EXTNAME, 'show_ui', '1', false)
     return SB
 end
