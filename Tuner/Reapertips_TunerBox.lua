@@ -1,7 +1,7 @@
 --[[
   @description TunerBox
   @author Reapertips (Alejandro Hernandez)
-  @version 1.0.5
+  @version 1.0.6
   @license MIT
   @link https://www.reapertips.com
   @provides
@@ -92,8 +92,9 @@
     Pitch detection is a small JSFX installed alongside this script. It
     analyses the selected input and reports the frequency back through gmem.
   @changelog
-    - Fixed: after loading a project in the same tab, TunerBox could keep switching off the master send of one of your tracks.
-    - A tuner track saved in a project now listens to the input you picked.
+    - New option: Disarm tracks while tuning. It disarms your tracks while the tuner is on and arms them again when you turn it off, even after quitting REAPER.
+    - Tooltips now stay visible while you hover.
+    - Fixed the menu closing right after opening on Linux.
 ]]
 
 
@@ -181,7 +182,6 @@ local resize_flags = 0
 local resize_cursor
 
 local prev_hover_m_x, prev_hover_m_y
-local prev_tooltip
 local mouse_x, mouse_y
 local hover_cnt = 0
 
@@ -311,6 +311,9 @@ local function GWrite(i, v)
     reaper.gmem_write(i, v)
 end
 local TRACK_TAG = 'RTIPS_TUNER'
+-- Stored on each user track the tuner disarmed, so the list survives the
+-- script (the project is saved with REC 0 on them otherwise).
+local DISARM_TAG = 'RTIPS_TUNER_DISARMED'
 
 local NOTE_NAMES = {'C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#',
                     'B'}
@@ -363,6 +366,7 @@ local T = {
     disp_step = nil,    -- cents per pixel of the deviation bar
     pub_live = nil,     -- last state published to the toggle action
     swept_proj = nil,   -- SweepOrphanTracks memo
+    repair_keys = nil,  -- RepairLeftovers memo, per project
     swept_cnt = nil,
     -- The project the hidden track lives in. The tuner deliberately does
     -- NOT follow the user around project tabs: creating a track dirties a
@@ -371,6 +375,10 @@ local T = {
     proj = nil,
     parked = false,
     err = nil,
+    -- "Disarm tracks while tuning": the setting, and what was disarmed
+    -- ({proj = ReaProject, guids = {track GUIDs}}), nil when nothing is.
+    disarm = reaper.GetExtState(extname, 'disarm_tracks') == '1',
+    disarmed = nil,
 }
 
 local JSFX_CODE = [==[
@@ -1805,6 +1813,229 @@ function OpenBigTuner()
     end
 end
 
+-- ---------------------------------------------------------------------
+-- Disarm tracks while tuning
+--
+-- The detector never needs the user's tracks: it reads the hardware input
+-- through its own hidden track (record mode "disable", armed, monitoring).
+-- So the user's armed tracks can be switched off while tuning, which keeps
+-- a guitar going into the tuner from also being heard or recorded on them.
+-- Tracks are remembered by GUID, per project, and put back when the tuner
+-- goes off or the script exits. Nothing here ever touches a tuner track.
+-- ---------------------------------------------------------------------
+
+local function IsRecording(proj)
+    return reaper.GetPlayStateEx(proj) & 4 ~= 0
+end
+
+local function IsTaggedTrack(track)
+    return reaper.GetSetMediaTrackInfo_String(track, 'P_EXT:' .. TRACK_TAG,
+        '', false) == true
+end
+
+-- The mark holds the track's own GUID. A copy of a marked track (duplicate,
+-- track template, insert from another project) carries a mark that no longer
+-- matches its GUID, and is not ours to act on.
+local function IsMarkedDisarmed(track)
+    local _, v = reaper.GetSetMediaTrackInfo_String(track,
+        'P_EXT:' .. DISARM_TAG, '', false)
+    return v ~= nil and v ~= '' and v == reaper.GetTrackGUID(track)
+end
+
+local function HasAnyMark(track)
+    local _, v = reaper.GetSetMediaTrackInfo_String(track,
+        'P_EXT:' .. DISARM_TAG, '', false)
+    return v ~= nil and v ~= ''
+end
+
+local function ClearDisarmMark(track)
+    reaper.GetSetMediaTrackInfo_String(track, 'P_EXT:' .. DISARM_TAG, '', true)
+end
+
+-- Disarms every armed user track in the tuner's project and remembers them.
+-- Tracks a previous session left marked (saved while the tuner was on) are
+-- taken over too, so switching off puts them back.
+-- Does nothing while that project is recording, or when the setting is off.
+function DisarmUserTracks()
+    if not T.disarm or T.disarmed then return end
+    local proj = T.proj
+    if not proj or not reaper.ValidatePtr(proj, 'ReaProject*') then return end
+    if IsRecording(proj) then return end
+    local guids = {}
+    local armed = {}
+    for i = 0, reaper.CountTracks(proj) - 1 do
+        local track = reaper.GetTrack(proj, i)
+        if track and not IsTaggedTrack(track) and
+            reaper.GetMediaTrackInfo_Value(track, 'I_RECARM') == 1 then
+            armed[#armed + 1] = track
+            guids[#guids + 1] = reaper.GetTrackGUID(track)
+        elseif track and not IsTaggedTrack(track) and HasAnyMark(track) then
+            if IsMarkedDisarmed(track) then
+                -- disarmed by an earlier session of the tuner and saved
+                -- that way: still ours to put back
+                guids[#guids + 1] = reaper.GetTrackGUID(track)
+            else
+                ClearDisarmMark(track)   -- a copy's mark
+            end
+        end
+    end
+    if #guids == 0 then return end
+    -- No undo point: the API calls below do not create one, and the
+    -- project was already modified by the tuner's own track.
+    reaper.PreventUIRefresh(1)
+    for _, track in ipairs(armed) do
+        -- the mark goes on first: a project saved from here on can always
+        -- be repaired, even if the script never gets to run again
+        reaper.GetSetMediaTrackInfo_String(track, 'P_EXT:' .. DISARM_TAG,
+            reaper.GetTrackGUID(track), true)
+        reaper.SetMediaTrackInfo_Value(track, 'I_RECARM', 0)
+    end
+    reaper.PreventUIRefresh(-1)
+    T.disarmed = {proj = proj, guids = guids}
+end
+
+-- A remembered track that is armed again was armed by the user: from then
+-- on it is theirs. Forgetting it here is what keeps a later hand disarm
+-- from being undone when the tuner goes off.
+function ForgetHandArmedTracks()
+    local d = T.disarmed
+    if not d or not reaper.ValidatePtr(d.proj, 'ReaProject*') then return end
+    local want = {}
+    for _, guid in ipairs(d.guids) do want[guid] = true end
+    for i = 0, reaper.CountTracks(d.proj) - 1 do
+        local track = reaper.GetTrack(d.proj, i)
+        local guid = track and reaper.GetTrackGUID(track)
+        if track and want[guid] and not IsTaggedTrack(track) and
+            reaper.GetMediaTrackInfo_Value(track, 'I_RECARM') == 1 then
+            want[guid] = nil
+            ClearDisarmMark(track)
+        end
+    end
+    local kept = {}
+    for _, guid in ipairs(d.guids) do
+        if want[guid] then kept[#kept + 1] = guid end
+    end
+    d.guids = kept
+    if #kept == 0 then T.disarmed = nil end
+end
+
+-- Repairs what a previous session left behind: user tracks still marked as
+-- disarmed by the tuner (project saved with the tuner on, or REAPER closed
+-- while a restore was waiting for a recording). The tuner's own track in the
+-- project is the sign that the session really ended with the tuner on; a
+-- mark without it is stale (the project was reopened and saved without the
+-- tuner, tracks left disarmed on purpose) and is only cleared. Otherwise it
+-- re-arms the tracks, clears the marks, and takes out the tuner's leftover
+-- track, in a project that is being modified anyway. Each tab is looked at
+-- again only when its track count or state changed, and a clean project is
+-- never written to.
+function RepairLeftovers()
+    T.repair_keys = T.repair_keys or {}
+    local seen = {}
+    local p = 0
+    while p < 128 do
+        local proj = reaper.EnumProjects(p)
+        if not proj then break end
+        p = p + 1
+        seen[proj] = true
+        local function Key()
+            return reaper.CountTracks(proj) .. ':' ..
+                reaper.GetProjectStateChangeCount(proj)
+        end
+        if T.repair_keys[proj] ~= Key() then
+            local live = {}
+            if T.disarmed and T.disarmed.proj == proj then
+                for _, guid in ipairs(T.disarmed.guids) do live[guid] = true end
+            end
+            local marked, stale, has_tuner = {}, {}, false
+            for i = 0, reaper.CountTracks(proj) - 1 do
+                local track = reaper.GetTrack(proj, i)
+                if track and IsTaggedTrack(track) then
+                    has_tuner = true
+                elseif track and HasAnyMark(track) and
+                    not live[reaper.GetTrackGUID(track)] then
+                    if IsMarkedDisarmed(track) then
+                        marked[#marked + 1] = track
+                    else
+                        stale[#stale + 1] = track
+                    end
+                end
+            end
+            local waiting = false
+            if #marked > 0 and not has_tuner then
+                stale = marked
+                marked = {}
+            end
+            if #marked > 0 and IsRecording(proj) then
+                waiting = true
+            elseif #marked > 0 or #stale > 0 then
+                reaper.PreventUIRefresh(1)
+                for _, track in ipairs(stale) do ClearDisarmMark(track) end
+                for _, track in ipairs(marked) do
+                    reaper.SetMediaTrackInfo_Value(track, 'I_RECARM', 1)
+                    ClearDisarmMark(track)
+                end
+                if #marked > 0 and not (T.on and T.proj == proj) then
+                    for i = reaper.CountTracks(proj) - 1, 0, -1 do
+                        local track = reaper.GetTrack(proj, i)
+                        if track and IsTaggedTrack(track) then
+                            reaper.DeleteTrack(track)
+                        end
+                    end
+                end
+                reaper.PreventUIRefresh(-1)
+                reaper.TrackList_AdjustWindows(false)
+            end
+            -- keep looking while a recording blocks a repair; otherwise
+            -- take the picture after our own writes
+            T.repair_keys[proj] = (not waiting) and Key() or nil
+        end
+    end
+    for proj in pairs(T.repair_keys) do
+        if not seen[proj] then T.repair_keys[proj] = nil end
+    end
+end
+
+-- Re-arms what DisarmUserTracks switched off, if the track still exists.
+-- Looks tracks up by GUID, so a deleted or reordered track is never
+-- mistaken for another. A closed project tab simply has nothing to restore.
+-- Waits while the project records (the memory is kept; TunerTick retries).
+function RestoreArmedTracks()
+    local d = T.disarmed
+    if not d then return end
+    if not reaper.ValidatePtr(d.proj, 'ReaProject*') then
+        T.disarmed = nil
+        return
+    end
+    if IsRecording(d.proj) then return end
+    local want = {}
+    for _, guid in ipairs(d.guids) do want[guid] = true end
+    T.disarmed = nil
+    reaper.PreventUIRefresh(1)
+    for i = 0, reaper.CountTracks(d.proj) - 1 do
+        local track = reaper.GetTrack(d.proj, i)
+        if track and not IsTaggedTrack(track) and
+            want[reaper.GetTrackGUID(track)] then
+            if reaper.GetMediaTrackInfo_Value(track, 'I_RECARM') ~= 1 then
+                reaper.SetMediaTrackInfo_Value(track, 'I_RECARM', 1)
+            end
+            ClearDisarmMark(track)
+        end
+    end
+    reaper.PreventUIRefresh(-1)
+end
+
+-- The menu item. Takes effect at once if the tuner is already running.
+function SetDisarmTracks(enable)
+    T.disarm = enable and true or false
+    reaper.SetExtState(extname, 'disarm_tracks', T.disarm and '1' or '0', true)
+    if T.disarm then
+        if TunerIsLive() then DisarmUserTracks() end
+    else
+        RestoreArmedTracks()
+    end
+end
+
 function SetTunerEnabled(enable)
     if enable == T.on then return end
     T.on = enable
@@ -1834,10 +2065,13 @@ function SetTunerEnabled(enable)
             -- undo everything the failed attempt did, or a half made track
             -- is left in the project with the tuner reporting it is off
             RemoveAllTunerTracks()
+        else
+            DisarmUserTracks()
         end
         SetDisplay('---', 0, false)
     else
         RemoveAllTunerTracks()
+        RestoreArmedTracks()
         T.parked = false
         SetDisplay('---', 0, false)
     end
@@ -1849,6 +2083,7 @@ end
 -- the tuner on in, and it only ever runs from a deliberate click.
 function MoveTunerHere()
     RemoveAllTunerTracks()
+    RestoreArmedTracks()
     GWrite(GB + 9, 0)
     T.floor = 1
     T.hist = {}
@@ -1858,6 +2093,8 @@ function MoveTunerHere()
         reaper.MB(T.err, box_name, 0)
         T.err = nil
         SetTunerEnabled(false)
+    else
+        DisarmUserTracks()
     end
     is_redraw = true
 end
@@ -1956,6 +2193,7 @@ function TunerTick()
     local time = reaper.time_precise()
 
     ServiceToggleRequest(time)
+    ServicePendingMenu()
 
     if T.on and not T.parked and time > T.poll_time + 0.02 then
         T.poll_time = time
@@ -1965,7 +2203,12 @@ function TunerTick()
     if time <= T.check_time + 1 then return end
     T.check_time = time
 
+    ForgetHandArmedTracks()
+    RepairLeftovers()
+
     if not T.on then
+        -- a restore that had to wait for a recording to end
+        RestoreArmedTracks()
         SweepOrphanTracks()
         return
     end
@@ -2028,6 +2271,30 @@ function TunerTooltip()
         end
     end
     return 'Toggle tuner (right click for settings)'
+end
+
+-- REAPER hides a tooltip on its own a moment after it is set, so setting it
+-- once while the mouse rests on the fork shows it only briefly. While the
+-- mouse stays there it is sent again every TOOLTIP_RESEND seconds: well
+-- inside the time REAPER keeps it up, and slow enough that the same text at
+-- the same spot is a refresh, not a redraw on every pass of the loop.
+local TOOLTIP_RESEND = 0.5
+
+-- True when the tooltip should be (re)sent now: the text changed, or the
+-- last send is old enough that REAPER may have hidden it.
+function TooltipDue(text, now)
+    if text == T.tip and now - (T.tip_time or 0) < TOOLTIP_RESEND then
+        return false
+    end
+    T.tip, T.tip_time = text, now
+    return true
+end
+
+-- Hides our tooltip, once, when the mouse stops resting on the fork.
+function ClearTooltip()
+    if not T.tip then return end
+    T.tip, T.tip_time = nil, nil
+    reaper.TrackCtl_SetToolTip('', 0, 0, true)
 end
 
 -- What every click on the box does. Parked (the tuner is on but we are in
@@ -3921,6 +4188,9 @@ function BuildRightClickMenu()
 
     m.Add('Open big tuner', OpenBigTuner)
 
+    m.Add('Disarm tracks while tuning',
+        function() SetDisarmTracks(not T.disarm) end, T.disarm)
+
     m.Add(('Reference pitch: A4 = %g Hz'):format(T.a4), function()
         local ret, input = reaper.GetUserInputs('Reference pitch', 1,
             'A4 in Hz:', T.a4)
@@ -3968,7 +4238,48 @@ end
 -- a device or theme name can never insert a phantom field.
 -- ---------------------------------------------------------------------------
 
+-- Linux only. The menu hangs from a hidden helper window. On Linux the
+-- window manager can still be mapping that window when gfx.showmenu is
+-- called straight after gfx.init, and the menu then closes as soon as it
+-- opens (reported on Mint/Cinnamon). So on Linux the menu is shown a few
+-- passes of the main loop AFTER the window is created, pumping it with
+-- gfx.update meanwhile. How many passes can be changed without a rebuild
+-- through the ExtState key 'linux_menu_settle' (0 = show at once, the
+-- behaviour up to 1.0.5), so a test build can find the variant that works.
+local LINUX_MENU_SETTLE = 2
+
+local function LinuxMenuSettle()
+    local n = tonumber(reaper.GetExtState(extname, 'linux_menu_settle'))
+    if not n then return LINUX_MENU_SETTLE end
+    return math.max(0, math.min(30, math.floor(n)))
+end
+
+-- Opens the menu from the (already created) helper window and runs the
+-- chosen action. Shared by every platform.
+local function RunMenu(menu, focus_hwnd)
+    local ret = gfx.showmenu(CreateMenuRecursive(menu))
+    gfx.quit()
+
+    if focus_hwnd then reaper.JS_Window_SetFocus(focus_hwnd) end
+    if ret > 0 then ReturnMenuRecursive(menu, ret) end
+
+    -- Make sure that user can click box to close menu
+    menu_time = reaper.time_precise()
+    is_left_click = false
+    is_right_click = false
+    drag_x = nil
+end
+
+local function HideMenuWindow()
+    local gfx_hwnd = reaper.JS_Window_Find('TunerBox Menu', true)
+    reaper.JS_Window_SetOpacity(gfx_hwnd, 'ALPHA', 0)
+    return gfx_hwnd
+end
+
 function ShowMenu(menu)
+    -- one menu at a time: a click while a Linux menu is still settling
+    if T.pending_menu then return end
+
     SetCursor(normal_cursor)
 
     local focus_hwnd = reaper.JS_Window_GetFocus()
@@ -3985,10 +4296,14 @@ function ShowMenu(menu)
     gfx.x, gfx.y = gfx.screentoclient(menu_x, menu_y)
 
     -- Hide gfx window
-    local gfx_hwnd = reaper.JS_Window_Find('TunerBox Menu', true)
-    reaper.JS_Window_SetOpacity(gfx_hwnd, 'ALPHA', 0)
+    local gfx_hwnd = HideMenuWindow()
 
     if is_linux then
+        local settle = LinuxMenuSettle()
+        if settle > 0 then
+            T.pending_menu = {menu = menu, focus = focus_hwnd, left = settle}
+            return
+        end
         reaper.JS_Window_SetStyle(gfx_hwnd, 'POPUP')
     else
         reaper.JS_Window_Show(gfx_hwnd, 'HIDE')
@@ -3996,17 +4311,21 @@ function ShowMenu(menu)
     end
 
     -- Show menu
-    local ret = gfx.showmenu(CreateMenuRecursive(menu))
-    gfx.quit()
+    RunMenu(menu, focus_hwnd)
+end
 
-    if focus_hwnd then reaper.JS_Window_SetFocus(focus_hwnd) end
-    if ret > 0 then ReturnMenuRecursive(menu, ret) end
-
-    -- Make sure that user can click box to close menu
-    menu_time = reaper.time_precise()
-    is_left_click = false
-    is_right_click = false
-    drag_x = nil
+-- Called once per pass of the main loop (from TunerTick). Counts down the
+-- settle passes of a Linux menu, then finishes opening it.
+function ServicePendingMenu()
+    local pm = T.pending_menu
+    if not pm then return end
+    gfx.update()
+    pm.left = pm.left - 1
+    if pm.left > 0 then return end
+    T.pending_menu = nil
+    local gfx_hwnd = HideMenuWindow()
+    reaper.JS_Window_SetStyle(gfx_hwnd, 'POPUP')
+    RunMenu(pm.menu, pm.focus)
 end
 
 -- ------------------------------------------------------------ neighbors --
@@ -5030,14 +5349,14 @@ function Main()
 
                 if hover_cnt > 11 then
                     local tooltip = TunerTooltip()
-                    if tooltip ~= prev_tooltip then
-                        prev_tooltip = tooltip
+                    local now = reaper.time_precise()
+                    if TooltipDue(tooltip, now) then
                         local offs = Scale(17, measure_scale)
                         reaper.TrackCtl_SetToolTip(tooltip, mouse_x + offs,
                             mouse_y + offs, true)
                     end
-                elseif prev_tooltip then
-                    prev_tooltip = nil
+                elseif T.tip then
+                    ClearTooltip()
                 end
             end
         else
@@ -5188,6 +5507,9 @@ function Main()
     -- (the tuner's periodic work runs at the top of Main, so that it still
     -- happens while the transport window is hidden)
 
+    -- the mouse left the fork: take our tooltip down
+    if not is_snap_hovered and T.tip then ClearTooltip() end
+
     -- step aside if a neighbor box (GridBox, ChordBox...) starts on our spot
     AvoidNeighbors()
 
@@ -5275,6 +5597,7 @@ function Exit()
 
     -- Removal is by tag, so nothing the user made is ever deleted.
     RemoveAllTunerTracks()
+    RestoreArmedTracks()
 
     if bitmap then reaper.JS_LICE_DestroyBitmap(bitmap) end
     if snap_bitmap then reaper.JS_LICE_DestroyBitmap(snap_bitmap) end
