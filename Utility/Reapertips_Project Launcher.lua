@@ -1,20 +1,13 @@
 --[[
   @description Project Launcher
   @author Reapertips (Alejandro Hernandez)
-  @version 1.2.0
+  @version 1.2.1
   @license MIT
   @changelog
-    - You can now select several projects (Cmd/Ctrl+click, Shift+click) and open or remove them together.
-    - Middle click opens a project in a new tab.
-    - You can now remove a project from Recent, with Undo.
-    - New: backups of the selected project, so you can open one without browsing folders. Right click a backup for more ways to open it.
-    - New setting: Show on every new empty tab.
-    - Read-only and FX offline can now be combined, with checkboxes above Open.
-    - Templates can now open with FX offline, from the panel or the right-click menu.
-    - Cmd/Ctrl+W closes the window. On Linux, Super+Q closes it too.
-    - Fixed a project failing to load and leaving an empty tab. It now shows what happened and closes that tab.
-    - Fixed the `Missing PopStyleVar` error.
-    - Fixed Ctrl+O leaving the windows stuck, even after Cancel.
+    - Fixed the `Missing PopStyleVar` error when opening the window. It came from the window being docked. Project Launcher now always opens as its own window.
+    - The window now closes with the system's close shortcut, like Alt+F4, or Super+Q on COSMIC.
+    - Dates now follow your computer's date format.
+    - In Settings, Start on: "Last used" is now called "Last tab".
   @link
     Reapertips https://www.reapertips.com
   @about
@@ -96,7 +89,7 @@
 
 local SB = {
     NAME    = 'Project Launcher',
-    VERSION = '1.2.0',
+    VERSION = '1.2.1',
     EXTNAME = 'RTIPS.ProjectLauncher',
     OLD_EXTNAME = 'RTIPS.StartBox',
 }
@@ -264,7 +257,7 @@ local API_NAMES = {
     'TableFlags_Sortable', 'TableGetColumnSortSpecs', 'TableHeadersRow',
     'TableNeedSort', 'TableNextRow', 'TableSetColumnIndex',
     'TableSetupColumn', 'TableSetupScrollFreeze', 'Text', 'TextColored',
-    'TextWrapped', 'WindowFlags_AlwaysAutoResize', 'WindowFlags_NoCollapse', 'WindowFlags_NoScrollWithMouse', 'WindowFlags_NoScrollbar',
+    'TextWrapped', 'WindowFlags_AlwaysAutoResize', 'WindowFlags_NoCollapse', 'WindowFlags_NoDocking', 'WindowFlags_NoScrollWithMouse', 'WindowFlags_NoScrollbar',
     'WindowFlags_NoTitleBar', 'IsItemClicked', 'MouseButton_Middle',
     'Key_W', 'Key_Q', 'Key_A', 'Key_Delete', 'Mod_Shift',
 }
@@ -372,12 +365,68 @@ function SB.human_time(seconds)
     return string.format('%d:%02d', m, s)
 end
 
--- One shape for every date in the column: 08/20/26, or 08/20/26 14:05 with
--- the time on. Relative words like "yesterday" read nicely on their own but
--- wreck a column you scan.
+-- The system's short date pattern, as each OS spells it: "dd/MM/y" (Mac),
+-- "dd/MM/yyyy" (Windows), "%d/%m/%Y" (Linux). Lua's os.date can't tell: REAPER
+-- runs in the C locale, and a Mac app gets no LANG at all. Nil when unreadable.
+function SB.read_date_pattern()
+    if not reaper.ExecProcess then return nil end
+    local cmd
+    if IS_MAC then
+        cmd = '/usr/bin/osascript -l JavaScript -e "ObjC.import(\'Foundation\');'
+            .. 'var f=$.NSDateFormatter.alloc.init;f.dateStyle=1;f.dateFormat.js"'
+    elseif IS_WIN then
+        cmd = 'reg query "HKCU\\Control Panel\\International" /v sShortDate'
+    else
+        cmd = 'locale d_fmt'
+    end
+    local out = reaper.ExecProcess(cmd, 2000)
+    if not out then return nil end
+    local code, text = out:match('^(%-?%d+)\r?\n(.*)$')
+    if code ~= '0' or not text then return nil end
+    if IS_WIN then return text:match('REG_SZ%s+([^\r\n]+)') end
+    return text:match('[^\r\n]+')
+end
+
+-- A system pattern to an os.date format, keeping only its order and separator.
+-- Day and month are always two digits so the column stays even. Year first
+-- gets all four: 26-11-04 reads like nothing. Nil when it isn't a plain date.
+function SB.date_shape(pattern)
+    if type(pattern) ~= 'string' then return nil end
+    local p = pattern:gsub('%%D', 'm/d/y'):gsub('%%F', 'y-m-d')
+    p = p:gsub('%%[eb]', { ['%e'] = 'd', ['%b'] = 'm' }):gsub('%%B', 'm')
+    p = p:gsub('%%', ''):lower()
+    -- dddd is the weekday's name in Windows patterns.
+    p = p:gsub('d+', function(run) return #run > 2 and '' or 'd' end)
+    local order, seen = {}, {}
+    for part in p:gmatch('[dmy]+') do
+        local c = part:sub(1, 1)
+        if part:find('[^' .. c .. ']') or seen[c] then return nil end
+        seen[c] = true
+        order[#order + 1] = c
+    end
+    if #order ~= 3 then return nil end
+    local sep = p:match('[dmy]+([^dmy])') or '/'
+    if not sep:find('[/.%-]') then sep = '/' end
+    local code = { d = '%d', m = '%m', y = order[1] == 'y' and '%Y' or '%y' }
+    return code[order[1]] .. sep .. code[order[2]] .. sep .. code[order[3]]
+end
+
+-- Read once, on the first date drawn. If the system won't say, a month name
+-- can't be read the wrong way round.
+function SB.date_format()
+    if not SB.date_fmt then
+        SB.date_fmt = SB.date_shape(SB.read_date_pattern()) or '%d %b %y'
+    end
+    return SB.date_fmt
+end
+
+-- One shape for every date in the column, in the system's order: 08/20/26, or
+-- 08/20/26 14:05 with the time on. Relative words like "yesterday" read nicely
+-- on their own but wreck a column you scan.
 function SB.relative_date(stamp, with_time)
     if not stamp or stamp <= 0 then return '' end
-    return os.date(with_time and '%m/%d/%y %H:%M' or '%m/%d/%y', stamp)
+    local fmt = SB.date_format()
+    return os.date(with_time and fmt .. ' %H:%M' or fmt, stamp)
 end
 
 -- Diagnostics for the one thing that depends on another extension.
@@ -544,7 +593,7 @@ end
 SB.SCAN_DEPTH = 5
 SB.VIEWS = { recent = 'Recent', templates = 'Templates', folders = 'Folders' }
 SB.OPEN_ON = { 'last', 'recent', 'templates', 'folders' }
-SB.OPEN_ON_LABEL = 'Last used\0Recent\0Templates\0Folders\0'
+SB.OPEN_ON_LABEL = 'Last tab\0Recent\0Templates\0Folders\0'
 SB.UNSORTED = 'Unsorted'
 SB.DND = 'SB_TEMPLATE'
 SB.PAIR_SEP = '\30'
@@ -3561,7 +3610,9 @@ local function draw_list(width, height)
                 ImGui.TableColumnFlags_PreferSortDescending |
                 ((HAS_JS and not tpl) and 0
                     or ImGui.TableColumnFlags_DefaultHide),
-                LPX(SB.cfg.show_time and 132 or 92))
+                -- A year-first date has two more digits to fit.
+                LPX((SB.cfg.show_time and 132 or 92)
+                    + (SB.date_format():find('%Y', 1, true) and 16 or 0)))
             ImGui.TableSetupColumn(ctx, 'SIZE',
                 ImGui.TableColumnFlags_WidthFixed |
                 ImGui.TableColumnFlags_DefaultHide |
@@ -5153,9 +5204,17 @@ loop = function()
         end
         SB.ui.resize = nil
     end
-    local visible = ImGui.Begin(ctx, SB.NAME .. '##main', nil,
+    -- NoDocking also undocks a window saved as docked. Docked, the first
+    -- panel's EndChild fails with "Missing PopStyleVar" on every launch, and
+    -- the dock is remembered, so the script could never open again.
+    -- p_open must be a value, not nil: with nil ImGui drops the system's close
+    -- request, so Alt+F4 or a compositor shortcut like Super+Q on COSMIC (which
+    -- never reaches the keyboard check) would do nothing.
+    local visible, open = ImGui.Begin(ctx, SB.NAME .. '##main', true,
         ImGui.WindowFlags_NoTitleBar | ImGui.WindowFlags_NoCollapse |
-        ImGui.WindowFlags_NoScrollbar | ImGui.WindowFlags_NoScrollWithMouse)
+        ImGui.WindowFlags_NoScrollbar | ImGui.WindowFlags_NoScrollWithMouse |
+        ImGui.WindowFlags_NoDocking)
+    if not open then S.quit = true end
     if visible then
         S.win_w, S.win_h = ImGui.GetWindowSize(ctx)
         S.win_x, S.win_y = ImGui.GetWindowPos(ctx)
