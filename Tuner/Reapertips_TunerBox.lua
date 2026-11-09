@@ -1,7 +1,7 @@
 --[[
   @description TunerBox
   @author Reapertips (Alejandro Hernandez)
-  @version 1.0.6
+  @version 1.0.7
   @license MIT
   @link https://www.reapertips.com
   @provides
@@ -92,9 +92,8 @@
     Pitch detection is a small JSFX installed alongside this script. It
     analyses the selected input and reports the frequency back through gmem.
   @changelog
-    - New option: Disarm tracks while tuning. It disarms your tracks while the tuner is on and arms them again when you turn it off, even after quitting REAPER.
-    - Tooltips now stay visible while you hover.
-    - Fixed the menu closing right after opening on Linux.
+    - New: Input > "Selected track". The tuner listens to whichever track you select, through a temporary send that is removed when you change track, switch input or close the tuner.
+    - Fixed the tooltip over the tuning fork flashing and disappearing, or pulsing, on Windows. It now stays up while the mouse rests on it.
 ]]
 
 
@@ -331,6 +330,11 @@ local T = {
     a4 = 440,   -- see the one time reset below
     -- I_RECINPUT value. Mono hardware input n -> n (0 based)
     input = tonumber(reaper.GetExtState(extname, 'input')) or 0,
+    -- "Selected track" input: listen to the track selected in REAPER through
+    -- a temporary send into our own track (see ServiceSelectedTrack)
+    sel = reaper.GetExtState(extname, 'input_mode') == 'sel',
+    sel_src = nil,    -- the track the temporary send comes from
+    sel_hint = nil,   -- short text shown when there is nothing to listen to
     -- Linear RMS below which the input is treated as silence (-48 dBFS)
     gate = tonumber(reaper.GetExtState(extname, 'gate')) or 0.0002,
     -- Lowest note the detector looks for. This was a setting until 1.4.0.
@@ -1102,6 +1106,7 @@ end
 -- shared gmem. Returns how many were removed.
 function RemoveAllTunerTracks(except)
     local removed = 0
+    ClearSelSends()
     local p = 0
     -- bounded on purpose: never trust an enumerator to terminate the loop
     while p < 128 do
@@ -1186,7 +1191,7 @@ function CreateTunerTrack()
     reaper.GetSetMediaTrackInfo_String(track, 'P_NAME', 'TunerBox (auto)', true)
     reaper.GetSetMediaTrackInfo_String(track, 'P_EXT:' .. TRACK_TAG, '1', true)
 
-    reaper.SetMediaTrackInfo_Value(track, 'I_RECINPUT', T.input)
+    reaper.SetMediaTrackInfo_Value(track, 'I_RECINPUT', TunerRecInput())
     ArmTunerTrack(track)
     reaper.SetMediaTrackInfo_Value(track, 'B_SHOWINTCP', 0)
     reaper.SetMediaTrackInfo_Value(track, 'B_SHOWINMIXER', 0)
@@ -1218,6 +1223,7 @@ function RemoveTunerTrack()
         reaper.GetSetMediaTrackInfo_String(track, 'P_EXT:' .. TRACK_TAG, '',
             false)
     if not is_ours then track = FindTunerTrack() end
+    ClearSelSends()
     T.track = nil
     T.fx = nil
     if track then
@@ -1326,8 +1332,8 @@ function EnsureTunerTrack()
         -- modified, and a saved track is usually already right.
         local V = reaper.GetMediaTrackInfo_Value
         local Set = reaper.SetMediaTrackInfo_Value
-        if V(track, 'I_RECINPUT') ~= T.input then
-            Set(track, 'I_RECINPUT', T.input)
+        if V(track, 'I_RECINPUT') ~= TunerRecInput() then
+            Set(track, 'I_RECINPUT', TunerRecInput())
         end
         -- A track saved by an older build, or edited by hand, can arrive in
         -- a capturing record mode. Fix that before arming it, not on the
@@ -1342,16 +1348,160 @@ function EnsureTunerTrack()
     return CreateTunerTrack()
 end
 
-function SetTunerInput(input)
-    T.input = input
-    reaper.SetExtState(extname, 'input', input, true)
+-- What the hidden track's hardware input should be. In "Selected track"
+-- mode it is none (-1), so the tuner hears only the send and never mixes in
+-- a hardware input at the same time.
+function TunerRecInput()
+    return T.sel and -1 or T.input
+end
+
+-- Re-arms so REAPER picks up a changed input.
+function ApplyRecInput()
     local track = T.track
     if IsTunerTrack(track) then
-        reaper.SetMediaTrackInfo_Value(track, 'I_RECINPUT', input)
-        -- Re-arm so REAPER picks up the new input
+        reaper.SetMediaTrackInfo_Value(track, 'I_RECINPUT', TunerRecInput())
         reaper.SetMediaTrackInfo_Value(track, 'I_RECARM', 0)
         reaper.SetMediaTrackInfo_Value(track, 'I_RECARM', 1)
     end
+end
+
+function SetTunerInput(input)
+    ClearSelSends()
+    T.sel = false
+    T.sel_hint = nil
+    T.input = input
+    reaper.SetExtState(extname, 'input', input, true)
+    reaper.SetExtState(extname, 'input_mode', '', true)
+    ApplyRecInput()
+end
+
+-- ---------------------------------------------------------------------
+-- Input: "Selected track"
+--
+-- The tuner listens to whatever track is selected through ONE temporary
+-- send, selected track -> the tuner's own hidden track. Rules:
+--   * the send carries a mark (P_EXT SEL_SEND_TAG) so a later run can find
+--     and delete one left behind by a crash;
+--   * at most one exists, and it is removed when the selection changes,
+--     when the input is switched, when the tuner is turned off and on exit;
+--   * nothing here creates an undo point (no Undo_* call), and the edits
+--     are wrapped in PreventUIRefresh. The send is a part of the project
+--     only while it is needed; if an undo takes it away the next pass
+--     puts it back.
+-- ---------------------------------------------------------------------
+
+SEL_SEND_TAG = 'RTIPS_TB_SEND'
+
+-- Only a send that carries our mark is ours. A send a user made into the
+-- tuner track by hand has no mark and is never touched.
+function SendIsOurs(src, i)
+    local ok = reaper.GetSetTrackSendInfo_String(src, 0, i,
+        'P_EXT:' .. SEL_SEND_TAG, '', false)
+    return ok and true or false
+end
+
+function IsTaggedTunerTrack(track)
+    return reaper.GetSetMediaTrackInfo_String(track,
+        'P_EXT:' .. TRACK_TAG, '', false) == true
+end
+
+-- Deletes our sends from one track. Returns how many were removed.
+function RemoveOurSends(src)
+    local n = 0
+    for i = reaper.GetTrackNumSends(src, 0) - 1, 0, -1 do
+        if SendIsOurs(src, i) then
+            reaper.RemoveTrackSend(src, 0, i)
+            n = n + 1
+        end
+    end
+    return n
+end
+
+-- Removes every temporary send in every open project. This is also the
+-- orphan cleanup: a send left by a crashed run is found by its mark.
+function ClearSelSends()
+    T.sel_src = nil
+    local p = 0
+    while p < 128 do
+        local proj = reaper.EnumProjects(p)
+        if not proj then break end
+        local n = 0
+        for i = 0, reaper.CountTracks(proj) - 1 do
+            local track = reaper.GetTrack(proj, i)
+            if track and reaper.GetTrackNumSends(track, 0) > 0 then
+                reaper.PreventUIRefresh(1)
+                n = n + RemoveOurSends(track)
+                reaper.PreventUIRefresh(-1)
+            end
+        end
+        if n > 0 then reaper.TrackList_AdjustWindows(false) end
+        p = p + 1
+    end
+end
+
+function HasSelSend(src, dest)
+    for i = 0, reaper.GetTrackNumSends(src, 0) - 1 do
+        if reaper.GetTrackSendInfo_Value(src, 0, i, 'P_DESTTRACK') == dest
+            and SendIsOurs(src, i) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Follows the selection. Cheap enough to run on every tick.
+function ServiceSelectedTrack()
+    if not (T.on and T.sel) or T.parked then return end
+    local tuner = T.track
+    if not IsTunerTrack(tuner) then return end
+    local proj = TunerProj()
+    local want = reaper.GetSelectedTrack(proj, 0)
+    local hint
+    if not want then
+        hint = 'Select a track to tune'
+    elseif want == tuner then
+        want, hint = nil, 'Select a track other than the tuner'
+    end
+    T.sel_hint = hint
+
+    local src = T.sel_src
+    if src and not reaper.ValidatePtr2(proj, src, 'MediaTrack*') then
+        src = nil
+        T.sel_src = nil
+    end
+    if src and src == want and HasSelSend(src, tuner) then return end
+
+    reaper.PreventUIRefresh(1)
+    if src then RemoveOurSends(src) end
+    T.sel_src = nil
+    if want then
+        local idx = reaper.CreateTrackSend(want, tuner)
+        if idx and idx >= 0 then
+            reaper.GetSetTrackSendInfo_String(want, 0, idx,
+                'P_EXT:' .. SEL_SEND_TAG, '1', true)
+            if not SendIsOurs(want, idx) then
+                -- No mark, no way to find it later: do not keep it.
+                reaper.RemoveTrackSend(want, 0, idx)
+                T.sel_hint = 'This REAPER cannot mark the send'
+                reaper.PreventUIRefresh(-1)
+                return
+            end
+            -- post-FX, pre-fader: the tuner hears the signal whatever the
+            -- fader is doing
+            reaper.SetTrackSendInfo_Value(want, 0, idx, 'I_SENDMODE', 3)
+            T.sel_src = want
+        end
+    end
+    reaper.PreventUIRefresh(-1)
+    reaper.TrackList_AdjustWindows(false)
+end
+
+function SetTunerInputSelected()
+    ClearSelSends()
+    T.sel = true
+    reaper.SetExtState(extname, 'input_mode', 'sel', true)
+    ApplyRecInput()
+    ServiceSelectedTrack()
 end
 
 --------------------------------- Pitch math --------------------------------
@@ -1735,7 +1885,8 @@ function ShowTunerStatus()
             verdict,
             advice ~= '' and (advice .. '\n') or '',
             '\n',
-            'its own hidden track',
+            T.sel and 'the selected track (temporary send)' or
+                'its own hidden track',
             tostring(T.on), tostring(valid),
             valid and reaper.TrackFX_GetCount(track) or 'n/a',
             valid and reaper.GetMediaTrackInfo_Value(track, 'I_RECARM') or '?',
@@ -2200,6 +2351,8 @@ function TunerTick()
         ReadTuner()
     end
 
+    ServiceSelectedTrack()
+
     if time <= T.check_time + 1 then return end
     T.check_time = time
 
@@ -2270,15 +2423,19 @@ function TunerTooltip()
                 and on to fix it'
         end
     end
+    if T.on and T.sel and T.sel_hint then return T.sel_hint end
     return 'Toggle tuner (right click for settings)'
 end
 
--- REAPER hides a tooltip on its own a moment after it is set, so setting it
--- once while the mouse rests on the fork shows it only briefly. While the
--- mouse stays there it is sent again every TOOLTIP_RESEND seconds: well
--- inside the time REAPER keeps it up, and slow enough that the same text at
--- the same spot is a refresh, not a redraw on every pass of the loop.
-local TOOLTIP_RESEND = 0.5
+-- REAPER takes a tooltip down by itself shortly after it is set (measured on
+-- Windows: the text is cleared about 0.25 s later), so while the mouse rests
+-- on the fork the tooltip is sent again every TOOLTIP_RESEND seconds.
+-- On macOS and Linux twice a second is enough. On Windows a send that
+-- arrives before REAPER's timer runs out just keeps the tooltip up with no
+-- blink (the same text at the same spot restarts the timer), but a gap longer
+-- than the timer shows as hide, show, hide, show. So there it is sent about
+-- ten times a second, always inside the window.
+local TOOLTIP_RESEND = is_windows and 0.1 or 0.5
 
 -- True when the tooltip should be (re)sent now: the text changed, or the
 -- last send is old enough that REAPER may have hidden it.
@@ -4013,6 +4170,7 @@ end
 -- ------------------------------------------------------------------ input --
 function BuildInputMenu(m)
     local num_inputs = reaper.GetNumAudioInputs()
+    m.Add('Selected track', SetTunerInputSelected, T.sel)
     if num_inputs == 0 then
         m.Add('No audio inputs found', nil, false, true)
         return
@@ -4021,11 +4179,11 @@ function BuildInputMenu(m)
         local name = reaper.GetInputChannelName(i)
         if not name or name == '' then name = tostring(i + 1) end
         m.Add(('Input %d: %s'):format(i + 1, name),
-            function() SetTunerInput(i) end, T.input == i)
+            function() SetTunerInput(i) end, not T.sel and T.input == i)
     end
     for i = 0, num_inputs - 2, 2 do
         m.Add(('Input %d/%d (stereo)'):format(i + 1, i + 2),
-            function() SetTunerInput(1024 + i) end, T.input == 1024 + i)
+            function() SetTunerInput(1024 + i) end, not T.sel and T.input == 1024 + i)
     end
 end
 
