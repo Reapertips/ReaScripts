@@ -1,13 +1,16 @@
 --[[
   @description Project Launcher
   @author Reapertips (Alejandro Hernandez)
-  @version 1.2.1
+  @version 1.3.0
   @license MIT
   @changelog
-    - Fixed the `Missing PopStyleVar` error when opening the window. It came from the window being docked. Project Launcher now always opens as its own window.
-    - The window now closes with the system's close shortcut, like Alt+F4, or Super+Q on COSMIC.
-    - Dates now follow your computer's date format.
-    - In Settings, Start on: "Last used" is now called "Last tab".
+    - New: Tree view. In Folders, turn on Tree view under Rescan to see your folders as a tree, like Finder. Click a folder to open or close it.
+    - New: a preview player. If a project has an .RPP-PROX file, press Play under its name, and click the bar to jump. No SWS needed.
+    - New: when it opens, the launcher checks your folders for new or removed projects and rescans only if something changed. Turn it off in Settings, Check folders for changes on open.
+    - Search ignores accents ("reka" finds "Řeka") and matches capital letters outside A to Z.
+    - Project details are more compact: two columns, and the tempo shows at most 2 decimals.
+    - Fixed Recent projects whose path in reaper.ini had stray NUL characters.
+    - Fixed long names cutting their last letter in half.
   @link
     Reapertips https://www.reapertips.com
   @about
@@ -213,8 +216,9 @@ local API_NAMES = {
     'Col_Text', 'Col_TextDisabled', 'Col_TitleBgActive', 'Col_WindowBg',
     'Cond_Appearing', 'Cond_FirstUseEver',
     'ConfigVar_WindowsMoveFromTitleBarOnly', 'CreateContext',
-    'CreateListClipper', 'DrawList_AddLine', 'DrawList_AddRectFilled',
-    'DrawList_PathArcTo', 'DrawList_PathClear', 'DrawList_PathFillConcave',
+    'CreateListClipper', 'DrawList_AddLine', 'DrawList_AddRectFilled', 'DrawList_AddCircleFilled',
+    'DrawList_AddTriangleFilled',
+    'DrawList_PathArcTo', 'DrawList_PathLineTo', 'DrawList_PathStroke', 'DrawList_PathClear', 'DrawList_PathFillConcave',
     'DrawList_AddText', 'DrawList_PushClipRect', 'DrawList_PopClipRect',
     'Dummy', 'End', 'EndChild', 'EndDisabled', 'EndPopup', 'EndTable',
     'GetContentRegionAvail', 'GetCursorPosX', 'GetCursorPosY',
@@ -226,7 +230,7 @@ local API_NAMES = {
     'InputTextFlags_EnterReturnsTrue', 'InvisibleButton',
     'IsItemActive', 'IsItemHovered', 'IsKeyPressed',
     'IsMouseDoubleClicked', 'IsWindowHovered', 'Key_Comma', 'Key_D',
-    'Key_DownArrow', 'Key_End', 'Key_Enter', 'Key_Escape', 'Key_F',
+    'Key_DownArrow', 'Key_LeftArrow', 'Key_End', 'Key_Enter', 'Key_Escape', 'Key_F',
     'Key_F5', 'Key_Home', 'Key_KeypadEnter', 'Key_N', 'Key_O',
     'Key_PageDown', 'Key_PageUp', 'Key_UpArrow', 'ListClipper_Begin',
     'ListClipper_GetDisplayRange', 'ListClipper_Step', 'MenuItem',
@@ -324,6 +328,75 @@ function SB.ext(name)
     return (name:match('%.([^.]+)$') or ''):lower()
 end
 
+-- string.lower only folds ASCII, so "Řeka" never matched a search for "řeka"
+-- and accented names sorted by byte value. This also folds the two-byte
+-- UTF-8 letters of Latin-1, Latin Extended-A, Greek and Cyrillic.
+function SB.lower(s)
+    s = s:lower()
+    if not s:find('[\xC3-\xD1]') then return s end
+    return (s:gsub('[\xC3-\xD1][\x80-\xBF]', function(ch)
+        local cp = ((ch:byte(1) & 0x1F) << 6) | (ch:byte(2) & 0x3F)
+        local lo
+        if cp >= 0xC0 and cp <= 0xDE and cp ~= 0xD7 then lo = cp + 0x20
+        elseif cp >= 0x100 and cp <= 0x137 and cp % 2 == 0 then lo = cp + 1
+        elseif cp >= 0x139 and cp <= 0x148 and cp % 2 == 1 then lo = cp + 1
+        elseif cp >= 0x14A and cp <= 0x177 and cp % 2 == 0 then lo = cp + 1
+        elseif cp == 0x178 then lo = 0xFF
+        elseif cp >= 0x179 and cp <= 0x17E and cp % 2 == 1 then lo = cp + 1
+        elseif cp >= 0x391 and cp <= 0x3A9 and cp ~= 0x3A2 then lo = cp + 0x20
+        elseif cp >= 0x410 and cp <= 0x42F then lo = cp + 0x20
+        elseif cp >= 0x400 and cp <= 0x40F then lo = cp + 0x50
+        end
+        if not lo then return ch end
+        return string.char(0xC0 | (lo >> 6), 0x80 | (lo & 0x3F))
+    end))
+end
+
+-- Search folding: SB.lower, then the accent taken off, so "reka" finds
+-- "Řeka", "cafe" finds "Café" and "nino" finds "Niño". Covers Latin-1
+-- Supplement and Latin Extended-A, plus loose combining marks (macOS can
+-- hand back names with the accent as a separate character). Only for
+-- matching: sorting and display keep the real letters.
+SB.FOLD_MAP = {}
+do
+    local spec = {
+        a = { 0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0x101, 0x103, 0x105 },
+        c = { 0xE7, 0x107, 0x109, 0x10B, 0x10D },
+        d = { 0xF0, 0x10F, 0x111 },
+        e = { 0xE8, 0xE9, 0xEA, 0xEB, 0x113, 0x115, 0x117, 0x119, 0x11B },
+        g = { 0x11D, 0x11F, 0x121, 0x123 },
+        h = { 0x125, 0x127 },
+        i = { 0xEC, 0xED, 0xEE, 0xEF, 0x129, 0x12B, 0x12D, 0x12F, 0x131 },
+        j = { 0x135 },
+        k = { 0x137, 0x138 },
+        l = { 0x13A, 0x13C, 0x13E, 0x140, 0x142 },
+        n = { 0xF1, 0x144, 0x146, 0x148, 0x149, 0x14B },
+        o = { 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF8, 0x14D, 0x14F, 0x151 },
+        r = { 0x155, 0x157, 0x159 },
+        s = { 0x15B, 0x15D, 0x15F, 0x161, 0x17F },
+        t = { 0x163, 0x165, 0x167 },
+        u = { 0xF9, 0xFA, 0xFB, 0xFC, 0x169, 0x16B, 0x16D, 0x16F, 0x171, 0x173 },
+        w = { 0x175 },
+        y = { 0xFD, 0xFF, 0x177 },
+        z = { 0x17A, 0x17C, 0x17E },
+        ae = { 0xE6 }, oe = { 0x153 }, ss = { 0xDF }, th = { 0xFE },
+        ij = { 0x133 },
+    }
+    for base, cps in pairs(spec) do
+        for _, cp in ipairs(cps) do
+            SB.FOLD_MAP[string.char(0xC0 | (cp >> 6), 0x80 | (cp & 0x3F))] = base
+        end
+    end
+end
+
+function SB.fold(s)
+    s = SB.lower(s)
+    if not s:find('[\xC3-\xC5\xCC\xCD]') then return s end
+    s = s:gsub('[\xC3-\xC5][\x80-\xBF]', SB.FOLD_MAP)
+    s = s:gsub('\xCC[\x80-\xBF]', ''):gsub('\xCD[\x80-\xAF]', '')
+    return s
+end
+
 -- Shortens a folder for display: keeps the last `keep` components.
 function SB.short_dir(dir, keep)
     keep = keep or 3
@@ -353,6 +426,19 @@ function SB.human_size(bytes)
         return string.format('%.1f MB', bytes / 1024 / 1024)
     end
     return string.format('%.2f GB', bytes / 1024 / 1024 / 1024)
+end
+
+function SB.clock(seconds)
+    seconds = math.max(0, math.floor((seconds or 0) + 0.5))
+    return ('%d:%02d'):format(seconds // 60, seconds % 60)
+end
+
+-- Tempo with at most 2 decimals, trailing zeros dropped: 90.0001 is "90",
+-- 92.5 is "92.5". A raw %g could print 90.0001 and break the two columns.
+function SB.fmt_tempo(bpm)
+    local s = ('%.2f'):format(bpm or 0):gsub('0+$', ''):gsub('%.$', '')
+    if s == '-0' then s = '0' end
+    return s
 end
 
 function SB.human_time(seconds)
@@ -619,7 +705,7 @@ function SB.map_encode(map)
     return table.concat(parts, SB.LIST_SEP)
 end
 
-SB.cfg = {}
+SB.cfg = { tree_state = {} }
 
 function SB.cfg_load()
     SB.migrated = reaper.GetExtState(SB.EXTNAME, 'migrated') == '1'
@@ -635,10 +721,13 @@ function SB.cfg_load()
     SB.cfg.show_time     = get_bool('show_time', false)
     SB.cfg.look          = get_ext('look', 'dark')
     SB.cfg.skip_if_open  = get_bool('skip_if_open', true)
+    SB.cfg.check_open    = get_bool('check_open', true)
     SB.cfg.watch_tabs    = get_bool('watch_tabs', false)
     SB.cfg.view          = get_ext('view', 'recent')
     SB.cfg.open_on       = get_ext('open_on', 'last')
     SB.cfg.open_in       = get_ext('open_in', 'current')
+    SB.cfg.tree          = get_bool('tree', false)
+    SB.cfg.tree_state    = SB.map_decode(get_ext('tree_state', ''))
     SB.cfg.sections      = SB.list_decode(get_ext('sections', ''))
     SB.cfg.filed         = SB.map_decode(get_ext('filed', ''))
     SB.cfg.used          = SB.map_decode(get_ext('used', ''))
@@ -762,7 +851,7 @@ function SB.section_list(items)
     for name in pairs(counts) do
         if not seen[name] and name ~= SB.UNSORTED then extra[#extra + 1] = name end
     end
-    table.sort(extra, function(a, b) return a:lower() < b:lower() end)
+    table.sort(extra, function(a, b) return SB.lower(a) < SB.lower(b) end)
     for _, name in ipairs(extra) do
         out[#out + 1] = { name = name, count = counts[name], own = false }
     end
@@ -868,7 +957,8 @@ function SB.parse_recent_ini(text)
             if key then
                 -- REAPER trims ini values. A trailing space kept here made
                 -- Main_openProject fail on Windows and leave a template tab.
-                value = value:match('^%s*(.-)%s*$')
+                -- Stray NUL bytes count as padding too.
+                value = value:gsub('\0', ''):match('^%s*(.-)%s*$')
                 local idx = key:lower():match('^recent(%d+)$')
                 if idx and value ~= '' then
                     entries[#entries + 1] = { idx = tonumber(idx), path = value }
@@ -1053,7 +1143,7 @@ function SB.load_templates(mode)
     end
     table.sort(list, function(a, b)
         if a.group ~= b.group then return a.group < b.group end
-        return a.name:lower() < b.name:lower()
+        return SB.lower(a.name) < SB.lower(b.name)
     end)
     for i, it in ipairs(list) do it.order = i end
     return list
@@ -1073,6 +1163,24 @@ local SKIP_DIRS = {
     ['_to_delete']  = true, ['node_modules'] = true,
 }
 
+-- Is `dir` the folder `base` or somewhere inside it?
+function SB.under_dir(dir, base)
+    local dk, bk = SB.path_key(dir), SB.path_key(base)
+    if dk == bk then return true end
+    local c = dk:sub(#bk + 1, #bk + 1)
+    return dk:sub(1, #bk) == bk and (c == '/' or c == '\\')
+end
+
+-- Roots of the scan that cannot be reached right now (unplugged drive, NAS
+-- off). Their old projects stay listed, as missing, instead of vanishing.
+function SB.unreachable_roots(roots)
+    local down = {}
+    for _, base in ipairs(roots or {}) do
+        if not SB.is_dir(base) then down[#down + 1] = base end
+    end
+    return down
+end
+
 function SB.scan_start(roots, depth)
     SB.scan.running = true
     SB.scan.found   = {}
@@ -1081,11 +1189,15 @@ function SB.scan_start(roots, depth)
     SB.scan.queue   = {}
     SB.scan.walked  = {}
     SB.scan.aborted = false
+    SB.scan.sig     = {}
+    SB.scan.partial = nil
+    SB.scan.roots   = {}
     for _, r in ipairs(roots) do
         -- SB.join never leaves a trailing separator, so roots must not
         -- either, or the loop guard would not recognize the same folder.
         local dir = SB.root_base(r)
         if dir ~= '' then
+            SB.scan.roots[#SB.scan.roots + 1] = dir
             SB.scan.queue[#SB.scan.queue + 1] = {
                 dir = dir, depth = depth or SB.SCAN_DEPTH,
             }
@@ -1109,11 +1221,14 @@ function SB.scan_step(budget)
         done = done + 1
         SB.scan.dirs = SB.scan.dirs + 1
 
+        local block = { dir = job.dir, files = {} }
+        SB.scan.sig[#SB.scan.sig + 1] = block
         local i, file = 0, reaper.EnumerateFiles(job.dir, 0)
         while file do
             if SB.ext(file) == 'rpp' then
                 local full = SB.join(job.dir, file)
                 local key = SB.path_key(full)
+                block.files[#block.files + 1] = { path = full, mt = SB.raw_mtime(full) }
                 if not SB.scan.seen[key] then
                     SB.scan.seen[key] = true
                     SB.scan.found[#SB.scan.found + 1] = {
@@ -1130,9 +1245,11 @@ function SB.scan_step(budget)
         end
 
         if job.depth > 0 then
+            block.nsub = 0
             local j, sub = 0, reaper.EnumerateSubdirectories(job.dir, 0)
             while sub do
                 if not SKIP_DIRS[sub:lower()] and sub:sub(1, 1) ~= '.' then
+                    block.nsub = block.nsub + 1
                     q[#q + 1] = { dir = SB.join(job.dir, sub), depth = job.depth - 1 }
                 end
                 j = j + 1
@@ -1144,8 +1261,23 @@ function SB.scan_step(budget)
 
     if #q == 0 then
         SB.scan.running = false
+        SB.scan.down = SB.unreachable_roots(SB.scan.roots)
+        if #SB.scan.down > 0 and not SB.scan.aborted then
+            for _, it in ipairs(SB.cache_load()) do
+                local key = SB.path_key(it.path)
+                if not SB.scan.seen[key] then
+                    for _, base in ipairs(SB.scan.down) do
+                        if SB.under_dir(it.dir, base) then
+                            SB.scan.seen[key] = true
+                            SB.scan.found[#SB.scan.found + 1] = it
+                            break
+                        end
+                    end
+                end
+            end
+        end
         table.sort(SB.scan.found, function(a, b)
-            return a.name:lower() < b.name:lower()
+            return SB.lower(a.name) < SB.lower(b.name)
         end)
         for k, it in ipairs(SB.scan.found) do it.order = k end
         -- An empty result usually means an unplugged drive or a bad path.
@@ -1154,6 +1286,7 @@ function SB.scan_step(budget)
         -- cache is better than replacing it with a fragment.
         if #SB.scan.found > 0 and not SB.scan.aborted then
             SB.cache_save(SB.scan.found)
+            SB.sig_save(SB.scan.sig, SB.scan.partial, SB.scan.down)
         end
         return false
     end
@@ -1202,6 +1335,122 @@ function SB.folder_label(item)
     return item.root_name or SB.dir_name(item.root)
 end
 
+------------------------------------------------------------------------------
+-- Folders as a tree
+--
+-- build_tree turns projects tagged by tag_roots (item.root, item.rel) into
+-- nested folder nodes, one top node per added folder. Only folders that lead
+-- to a project exist. REAPER's own "Name/Name.rpp" folder is folded into its
+-- parent so each project is one row, not a folder holding one row.
+-- tree_flatten walks that into the visible rows (folders and projects) and
+-- the list of visible projects, which stays the keyboard's list (S.shown).
+------------------------------------------------------------------------------
+
+SB.TREE_INDENT = 22
+
+function SB.build_tree(items)
+    local tops, top_by_key = {}, {}
+    local part_pat = IS_WIN and '[^/\\]+' or '[^/]+'
+    local function node_for(parent_list, by_key, key, name)
+        local node = by_key[key]
+        if not node then
+            node = { name = name, key = key, folders = {}, by_key = {},
+                     items = {}, count = 0 }
+            by_key[key] = node
+            parent_list[#parent_list + 1] = node
+        end
+        return node
+    end
+    for _, item in ipairs(items) do
+        local root = item.root or ''
+        local top = node_for(tops, top_by_key, SB.path_key(root),
+            item.root and (item.root_name or item.root) or 'Other')
+        top.path = root
+        local node, key = top, top.key
+        for part in (item.rel or ''):gmatch(part_pat) do
+            key = key .. '/' .. SB.path_key(part)
+            node = node_for(node.folders, node.by_key, key, part)
+        end
+        node.items[#node.items + 1] = item
+    end
+    local function finish(node, depth)
+        node.depth = depth
+        local kept = {}
+        for _, child in ipairs(node.folders) do
+            finish(child, depth + 1)
+            local only = child.items[1]
+            if #child.folders == 0 and #child.items == 1
+                    and SB.path_key(child.name) == SB.path_key(only.name) then
+                node.items[#node.items + 1] = only
+            else
+                kept[#kept + 1] = child
+            end
+        end
+        table.sort(kept, function(a, b)
+            local la, lb = SB.lower(a.name), SB.lower(b.name)
+            if la == lb then return a.name < b.name end
+            return la < lb
+        end)
+        node.folders, node.by_key = kept, nil
+        local n = #node.items
+        for _, child in ipairs(kept) do n = n + child.count end
+        node.count = n
+    end
+    for _, top in ipairs(tops) do finish(top, 0) end
+    table.sort(tops, function(a, b)
+        local la, lb = SB.lower(a.name), SB.lower(b.name)
+        if la == lb then return a.key < b.key end
+        return la < lb
+    end)
+    return tops
+end
+
+-- Folders start closed except the added ones; a click is remembered.
+function SB.tree_is_open(node)
+    local v = SB.cfg.tree_state[node.key]
+    if v == nil then return node.depth == 0 end
+    return v == '1'
+end
+
+function SB.tree_toggle(node)
+    local state = SB.tree_is_open(node) and '0' or '1'
+    -- Back at its default the folder needs no entry, so the saved list only
+    -- holds folders the user really changed.
+    if state == (node.depth == 0 and '1' or '0') then state = nil end
+    SB.cfg.tree_state[node.key] = state
+    -- A newline in a folder name would split the ini line; keep those
+    -- folders for this session only.
+    local keep = {}
+    for k, v in pairs(SB.cfg.tree_state) do
+        if not k:find('[\r\n\30\31]') then keep[k] = v end
+    end
+    set_ext('tree_state', SB.map_encode(keep))
+end
+
+-- rows: { folder = node, depth, open } or { item, idx, depth, parent }.
+-- visible: projects in row order (idx points into it). skip_top hides the
+-- added folder's own row, for the rail view of a single folder.
+function SB.tree_flatten(tops, skip_top)
+    local rows, visible, row_of = {}, {}, {}
+    local function walk(node, depth, hide_self)
+        local open = hide_self or SB.tree_is_open(node)
+        if not hide_self then
+            rows[#rows + 1] = { folder = node, depth = depth, open = open }
+        end
+        if not open then return end
+        local d = hide_self and depth or depth + 1
+        for _, child in ipairs(node.folders) do walk(child, d, false) end
+        for _, item in ipairs(node.items) do
+            visible[#visible + 1] = item
+            row_of[#visible] = #rows + 1
+            rows[#rows + 1] = { item = item, idx = #visible, depth = d,
+                                parent = (not hide_self) and node or nil }
+        end
+    end
+    for _, top in ipairs(tops) do walk(top, 0, skip_top and true or false) end
+    return rows, visible, row_of
+end
+
 function SB.cache_path()
     local dir = SB.join(reaper.GetResourcePath(), 'Scripts', 'Reapertips', 'Project Launcher')
     return dir, SB.join(dir, 'folder-cache.txt')
@@ -1231,6 +1480,499 @@ function SB.cache_load()
         }
     end
     return list
+end
+
+------------------------------------------------------------------------------
+-- .RPP-PROX preview. REAPER keeps a rendered copy of a project next to it
+-- (a WAV, named like the project plus -PROX). It plays through REAPER's own
+-- source preview (Xen_StartSourcePreview), so SWS is not needed. REAPER has
+-- no seek on that call, so the launcher copies the part still to play into a
+-- small temp WAV and previews that. Opening the .RPP-PROX itself as a source
+-- would make REAPER re-render (overwrite) it, so a file that is not a plain
+-- WAV is not played at all.
+------------------------------------------------------------------------------
+
+SB.px = {}
+SB.px_n = 0
+SB.px_found = {}
+
+function SB.prox_available()
+    return reaper.Xen_StartSourcePreview ~= nil
+        and reaper.Xen_StopSourcePreview ~= nil
+        and reaper.PCM_Source_CreateFromFile ~= nil
+end
+
+-- The .RPP-PROX that belongs to a project, or nil. Looked up once per project.
+function SB.prox_for(path)
+    local cached = SB.px_found[path]
+    if cached ~= nil then return cached or nil end
+    -- REAPER appends -PROX to the project's file name, so that is the name
+    -- tried first and it matches however the extension is cased (song.rpp
+    -- gives song.rpp-PROX). The rest are variants of the suffix's case, for
+    -- case-sensitive file systems. One lookup per project, cached below.
+    local base = path:gsub('%.[rR][pP][pP]$', '')
+    local found = false
+    local tries = { path .. '-PROX', path .. '-prox' }
+    for _, ext in ipairs({ '.RPP-PROX', '.rpp-PROX', '.RPP-prox', '.rpp-prox',
+                           '.Rpp-Prox' }) do
+        tries[#tries + 1] = base .. ext
+    end
+    for _, try in ipairs(tries) do
+        if reaper.file_exists(try) then found = try break end
+    end
+    SB.px_found[path] = found
+    return found or nil
+end
+
+-- Format and data position of a plain WAV, or nil.
+function SB.wav_info(path)
+    local f = io.open(path, 'rb')
+    if not f then return nil end
+    local head = f:read(12)
+    if not head or #head < 12 or head:sub(1, 4) ~= 'RIFF'
+            or head:sub(9, 12) ~= 'WAVE' then
+        f:close()
+        return nil
+    end
+    local flen = f:seek('end') or 0
+    local info, pos = {}, 12
+    for _ = 1, 64 do
+        f:seek('set', pos)
+        local h = f:read(8)
+        if not h or #h < 8 then break end
+        local id, size = h:sub(1, 4), string.unpack('<I4', h, 5)
+        if id == 'fmt ' then
+            local fm = f:read(math.min(size, 40))
+            if not fm or #fm < 16 then break end
+            info.fmt = fm
+            info.rate = string.unpack('<I4', fm, 5)
+            info.block = string.unpack('<I2', fm, 13)
+        elseif id == 'data' then
+            info.data_off = pos + 8
+            info.data_size = math.min(size, flen - (pos + 8))
+            break
+        end
+        pos = pos + 8 + size + (size % 2)
+    end
+    f:close()
+    if not (info.fmt and info.data_off and info.rate and info.rate > 0
+            and info.block and info.block > 0) then
+        return nil
+    end
+    info.frames = info.data_size // info.block
+    info.seconds = info.frames / info.rate
+    if info.frames < 1 then return nil end
+    return info
+end
+
+-- Windows of audio copied to the temp WAVs. The first one is small so Play
+-- starts at once; the next one is copied a little per frame while the
+-- current one plays, and started when the current one ends. A long PROX is
+-- never copied in one go, whatever the seek position.
+SB.PX_FIRST  = 15      -- seconds in the window that starts playing
+SB.PX_WINDOW = 45      -- seconds in every window after it
+SB.PX_CHUNK  = 2 << 20 -- bytes copied per frame for the next window
+SB.PX_SLOTS  = 3
+
+-- Temp files that could not be removed yet (REAPER may still hold them).
+-- They are retried on later frames, and at exit.
+SB.px_pending = {}
+SB.px_sweep_at = 0
+
+function SB.px_delete(path)
+    if not path then return end
+    os.remove(path)
+    if reaper.file_exists(path) then SB.px_pending[path] = true
+    else SB.px_pending[path] = nil end
+end
+
+-- force: retry now. Otherwise at most twice a second.
+function SB.px_sweep(force)
+    if next(SB.px_pending) == nil then return end
+    local now = reaper.time_precise()
+    if not force and now - SB.px_sweep_at < 0.5 then return end
+    SB.px_sweep_at = now
+    for path in pairs(SB.px_pending) do
+        os.remove(path)
+        if not reaper.file_exists(path) then SB.px_pending[path] = nil end
+    end
+end
+
+-- A temp path that is free to write: not one still waiting to be deleted.
+function SB.px_slot()
+    local dir = SB.cache_path()
+    reaper.RecursiveCreateDirectory(dir, 0)
+    for _ = 1, SB.PX_SLOTS do
+        SB.px_n = SB.px_n + 1
+        local p = SB.join(dir, ('prox-preview-%d.wav'):format(SB.px_n % SB.PX_SLOTS))
+        if not SB.px_pending[p] then return p end
+    end
+    return nil
+end
+
+-- Opens a copy of `nframes` frames starting at frame `skip`: the WAV header
+-- is written now, the audio by wav_copy. Returns a job, or nil.
+function SB.wav_begin(path, info, skip, nframes, out)
+    local fi = io.open(path, 'rb')
+    if not fi then return nil end
+    local fo = io.open(out, 'wb')
+    if not fo then fi:close() return nil end
+    local fmt = info.fmt
+    local pad = (#fmt % 2 == 1) and '\0' or ''
+    local n = nframes * info.block
+    fo:write('RIFF', string.pack('<I4', 4 + 8 + #fmt + #pad + 8 + n), 'WAVE',
+        'fmt ', string.pack('<I4', #fmt), fmt, pad,
+        'data', string.pack('<I4', n))
+    fi:seek('set', info.data_off + skip * info.block)
+    return { fi = fi, fo = fo, left = n, out = out }
+end
+
+-- Copies up to `bytes`. Returns true when the job is done (or failed:
+-- job.failed), closing both files.
+function SB.wav_copy(job, bytes)
+    while job.left > 0 and bytes > 0 do
+        local chunk = job.fi:read(math.min(job.left, bytes, 1 << 20))
+        if not chunk or #chunk == 0 then job.failed = true break end
+        job.fo:write(chunk)
+        job.left = job.left - #chunk
+        bytes = bytes - #chunk
+    end
+    if job.left <= 0 or job.failed then
+        SB.wav_close(job)
+        return true
+    end
+    return false
+end
+
+function SB.wav_close(job)
+    if job.fi then job.fi:close() job.fi = nil end
+    if job.fo then job.fo:close() job.fo = nil end
+end
+
+-- Writes `nframes` frames (default: all that is left) from `skip` into a
+-- WAV, all at once. Returns true when done.
+function SB.wav_tail(path, info, skip, out, nframes)
+    nframes = math.min(nframes or math.huge, info.frames - skip)
+    local job = SB.wav_begin(path, info, skip, nframes, out)
+    if not job then return false end
+    SB.wav_copy(job, math.huge)
+    return not job.failed
+end
+
+-- Length in seconds of a playable PROX, or nil. Read once per file, so the
+-- time can show before Play and nothing moves when it starts.
+SB.px_len = {}
+function SB.prox_len(prox)
+    local cached = SB.px_len[prox]
+    if cached ~= nil then return cached or nil end
+    local info = SB.wav_info(prox)
+    SB.px_len[prox] = info and info.seconds or false
+    return info and info.seconds or nil
+end
+
+-- Drops the next window that was being prepared.
+function SB.px_drop_next(px)
+    local nx = px.nxt
+    if not nx then return end
+    SB.wav_close(nx)
+    -- Never started, so the source is still ours to free.
+    if nx.src and reaper.PCM_Source_Destroy then
+        pcall(reaper.PCM_Source_Destroy, nx.src)
+    end
+    SB.px_delete(nx.out)
+    px.nxt = nil
+end
+
+function SB.prox_stop()
+    local px = SB.px
+    if px.id then pcall(reaper.Xen_StopSourcePreview, px.id) end
+    -- A source REAPER is previewing belongs to REAPER once the preview has
+    -- started: destroying it after Xen_StopSourcePreview crashed REAPER
+    -- 7.81 (Windows). Only a source that never started is ours to free.
+    if px.src and not px.id and reaper.PCM_Source_Destroy then
+        pcall(reaper.PCM_Source_Destroy, px.src)
+    end
+    SB.px_drop_next(px)
+    SB.px_delete(px.tmp)
+    SB.px = {}
+end
+
+-- Starts (or restarts) the preview of `item_path` at `frac` of its length.
+-- Returns true when it is playing.
+function SB.prox_start(item_path, prox, frac)
+    SB.prox_stop()
+    if not SB.prox_available() then return false end
+    frac = math.max(0, math.min(0.999, frac or 0))
+    local info = SB.wav_info(prox)
+    -- Not a plain WAV: opening a .RPP-PROX as a source makes REAPER
+    -- re-render (overwrite) it from the project, so never do it.
+    if not info then return false end
+    local skip = math.min(info.frames - 1, math.floor(frac * info.frames))
+    local nframes = math.max(1, math.min(info.frames - skip,
+        math.floor(SB.PX_FIRST * info.rate)))
+    local src
+    local tmp = SB.px_slot()
+    if tmp and SB.wav_tail(prox, info, skip, tmp, nframes) then
+        src = reaper.PCM_Source_CreateFromFile(tmp)
+    end
+    local id
+    if src then
+        local ok, rv = pcall(reaper.Xen_StartSourcePreview, src, 1.0, false)
+        if ok and type(rv) == 'number' and rv >= 0 then id = rv end
+    end
+    if not id then
+        SB.px = { src = src, tmp = tmp }
+        SB.prox_stop()
+        return false
+    end
+    local stop_at = skip + nframes
+    SB.px = {
+        item = item_path, prox = prox, id = id, src = src, tmp = tmp,
+        offset = skip / info.rate, dur = info.seconds,
+        started = reaper.time_precise(), seekable = true,
+        info = info, win_end = stop_at / info.rate,
+        next_skip = stop_at < info.frames and stop_at or nil,
+    }
+    return true
+end
+
+-- Prepares the next window a little each frame, and starts it when the
+-- current one ends. Returns false when the preview had to stop.
+function SB.px_pump(px, now)
+    local info = px.info
+    if px.next_skip and not px.nxt then
+        local out = SB.px_slot()
+        local n = math.min(info.frames - px.next_skip,
+            math.floor(SB.PX_WINDOW * info.rate))
+        local job = out and SB.wav_begin(px.prox, info, px.next_skip, n, out)
+        if job then
+            job.skip, job.frames = px.next_skip, n
+            px.nxt = job
+        else
+            SB.px_delete(out)
+            px.next_skip = nil -- plays to the end of this window, then stops
+        end
+    end
+    local nx = px.nxt
+    if nx and not nx.ready then
+        if SB.wav_copy(nx, SB.PX_CHUNK) then
+            if nx.failed then
+                SB.px_drop_next(px)
+                px.next_skip = nil
+            else
+                nx.src = reaper.PCM_Source_CreateFromFile(nx.out)
+                if nx.src then nx.ready = true
+                else
+                    SB.px_drop_next(px)
+                    px.next_skip = nil
+                end
+            end
+        end
+    end
+    nx = px.nxt
+    if nx and nx.ready and now - px.started >= px.win_end - px.offset then
+        local ok, rv = pcall(reaper.Xen_StartSourcePreview, nx.src, 1.0, false)
+        if not (ok and type(rv) == 'number' and rv >= 0) then
+            return false
+        end
+        pcall(reaper.Xen_StopSourcePreview, px.id)
+        SB.px_delete(px.tmp)
+        -- On time, the clock stays on the ideal line so the display does
+        -- not jump; if the copy was slow, it restarts from now.
+        local ideal = px.started + (px.win_end - px.offset)
+        px.started = (now - ideal > 0.25) and now or ideal
+        px.offset = nx.skip / info.rate
+        px.id, px.src, px.tmp = rv, nx.src, nx.out
+        local stop_at = nx.skip + nx.frames
+        px.win_end = stop_at / info.rate
+        px.next_skip = stop_at < info.frames and stop_at or nil
+        px.nxt = nil
+    end
+    return true
+end
+
+-- Where the playhead is, in seconds. Stops by itself at the end.
+function SB.prox_pos()
+    local px = SB.px
+    if not px.id then return 0 end
+    local now = reaper.time_precise()
+    if not SB.px_pump(px, now) then
+        SB.prox_stop()
+        return 0
+    end
+    local pos = px.offset + (now - px.started)
+    if pos >= px.dur or (pos >= px.win_end and not px.next_skip) then
+        SB.prox_stop()
+        return 0
+    end
+    -- The next window is not ready yet: wait at the end of this one.
+    return math.min(pos, px.win_end)
+end
+
+------------------------------------------------------------------------------
+-- Folder change check. A scan leaves a small fingerprint next to the cache:
+-- for every folder it walked, its project files (with their modified time
+-- when js_ReaScriptAPI is there) and how many subfolders it had. Opening the
+-- launcher compares that with the disk, a few folders per frame, and starts
+-- a rescan only if something differs.
+------------------------------------------------------------------------------
+
+-- The modified time as one comparable string, or '' without js_ReaScriptAPI.
+function SB.raw_mtime(path)
+    if not HAS_JS then return '' end
+    local ok, rv, _, _, mtime = pcall(reaper.JS_File_Stat, path)
+    if not ok or type(rv) ~= 'number' or rv < 0 or mtime == nil then return '' end
+    return tostring(mtime)
+end
+
+function SB.sig_path()
+    local dir = SB.cache_path()
+    return SB.join(dir, 'folder-sig.txt')
+end
+
+local function sig_clean(text)
+    return not text:find('[\t\r\n]')
+end
+
+function SB.sig_load()
+    local text = SB.read_file(SB.sig_path())
+    if not text then return nil end
+    local blocks, cur = {}, nil
+    for line in text:gmatch('[^\r\n]+') do
+        local kind, a, rest = line:match('^(%u)\t([^\t]*)\t(.*)$')
+        if kind == 'D' then
+            cur = { dir = rest, files = {}, nsub = tonumber(a) }
+            blocks[#blocks + 1] = cur
+        elseif kind == 'F' and cur then
+            cur.files[#cur.files + 1] = { path = rest, mt = a }
+        end
+    end
+    return blocks
+end
+
+-- partial: a root that was rescanned alone; the other roots keep their
+-- entries from the last full scan.
+function SB.sig_save(blocks, partial, down)
+    local keep = {}
+    if partial or (down and #down > 0) then
+        for _, b in ipairs(SB.sig_load() or {}) do
+            local old_down = false
+            for _, base in ipairs(down or {}) do
+                if SB.under_dir(b.dir, base) then old_down = true end
+            end
+            if old_down or (partial and not SB.under_dir(b.dir, partial)) then
+                keep[#keep + 1] = b
+            end
+        end
+    end
+    local dir = SB.cache_path()
+    reaper.RecursiveCreateDirectory(dir, 0)
+    local f = io.open(SB.sig_path(), 'wb')
+    if not f then return end
+    local function put(b)
+        if not sig_clean(b.dir) then return end
+        f:write('D\t', b.nsub and tostring(b.nsub) or '-', '\t', b.dir, '\n')
+        for _, e in ipairs(b.files) do
+            if sig_clean(e.path) then f:write('F\t', e.mt or '', '\t', e.path, '\n') end
+        end
+    end
+    for _, b in ipairs(keep) do put(b) end
+    for _, b in ipairs(blocks or {}) do put(b) end
+    f:close()
+end
+
+-- Is this folder still the way the fingerprint saw it?
+function SB.sig_block_same(b)
+    local known, n = {}, 0
+    for _, e in ipairs(b.files) do
+        known[SB.path_key(e.path)] = e
+    end
+    local i, file = 0, reaper.EnumerateFiles(b.dir, 0)
+    while file do
+        if SB.ext(file) == 'rpp' then
+            n = n + 1
+            local e = known[SB.path_key(SB.join(b.dir, file))]
+            if not e then return false end
+            if e.mt ~= '' and SB.raw_mtime(e.path) ~= e.mt then return false end
+        end
+        i = i + 1
+        file = reaper.EnumerateFiles(b.dir, i)
+    end
+    if n ~= #b.files then return false end
+    if b.nsub then
+        local c, j, sub = 0, 0, reaper.EnumerateSubdirectories(b.dir, 0)
+        while sub do
+            if not SKIP_DIRS[sub:lower()] and sub:sub(1, 1) ~= '.' then c = c + 1 end
+            j = j + 1
+            sub = reaper.EnumerateSubdirectories(b.dir, j)
+        end
+        if c ~= b.nsub then return false end
+    end
+    return true
+end
+
+SB.chk = { running = false, changed = false, spent = 0, steps = 0 }
+
+-- Starts the check. Without a fingerprint (first run of this version) the
+-- answer is simply "changed": one scan builds it.
+function SB.chk_start()
+    SB.chk = { running = false, changed = false, spent = 0, steps = 0, i = 1 }
+    if not SB.cfg.check_open or #SB.cfg.roots == 0 or SB.scan.running then
+        return false
+    end
+    local blocks = SB.sig_load()
+    if not blocks then
+        SB.chk.changed = true
+        return true
+    end
+    -- A root that is not there (unplugged drive, NAS off) is not "changed":
+    -- it is skipped, so its projects stay listed.
+    local down = SB.unreachable_roots((function()
+        local bases = {}
+        for _, r in ipairs(SB.cfg.roots) do bases[#bases + 1] = SB.root_base(r) end
+        return bases
+    end)())
+    local have = {}
+    for _, b in ipairs(blocks) do have[SB.path_key(b.dir)] = true end
+    for _, r in ipairs(SB.cfg.roots) do
+        local base = SB.root_base(r)
+        local is_down = false
+        for _, d in ipairs(down) do if d == base then is_down = true end end
+        if not is_down and not have[SB.path_key(base)] then
+            SB.chk.changed = true
+            return true
+        end
+    end
+    local live = {}
+    for _, b in ipairs(blocks) do
+        local skip = false
+        for _, d in ipairs(down) do
+            if SB.under_dir(b.dir, d) then skip = true end
+        end
+        if not skip then live[#live + 1] = b end
+    end
+    SB.chk.blocks, SB.chk.running = live, #live > 0
+    return true
+end
+
+-- Walks folders for about `seconds`, so a big library never stalls a frame.
+-- Returns true while there is more to compare.
+function SB.chk_step(seconds)
+    local c = SB.chk
+    if not c.running then return false end
+    local t0 = reaper.time_precise()
+    while c.i <= #c.blocks do
+        if not SB.sig_block_same(c.blocks[c.i]) then
+            c.changed, c.running = true, false
+            break
+        end
+        c.i = c.i + 1
+        if reaper.time_precise() - t0 >= seconds then break end
+    end
+    if c.i > #c.blocks then c.running = false end
+    c.steps = c.steps + 1
+    c.spent = c.spent + (reaper.time_precise() - t0)
+    return c.running
 end
 
 ------------------------------------------------------------------------------
@@ -1357,8 +2099,8 @@ end
 function SB.value_of(item, col)
     if col == 0 then return SB.fav_set[item.path] and 1 or 0 end
     if col == 1 then return item.order or 0 end
-    if col == 2 then return item.name:lower() end
-    if col == 3 then return item.dir:lower() end
+    if col == 2 then return SB.lower(item.name) end
+    if col == 3 then return SB.lower(item.dir) end
     if col == 4 then
         if item.when == nil then item.when = SB.file_mtime(item.path) or false end
         return item.when or 0
@@ -1385,7 +2127,7 @@ function SB.sort_list(list, col, descending)
     for _, item in ipairs(list) do SB.value_of(item, col) end
     table.sort(list, function(a, b)
         local va, vb = SB.value_of(a, col), SB.value_of(b, col)
-        if va == vb then return a.name:lower() < b.name:lower() end
+        if va == vb then return SB.lower(a.name) < SB.lower(b.name) end
         if descending then return va > vb end
         return va < vb
     end)
@@ -1539,7 +2281,7 @@ end
 -- Every space separated word must appear in the name or the folder.
 function SB.matches(item, words)
     if #words == 0 then return true end
-    local hay = (item.name .. ' ' .. item.dir):lower()
+    local hay = SB.fold(item.name .. ' ' .. item.dir)
     for _, w in ipairs(words) do
         if not hay:find(w, 1, true) then return false end
     end
@@ -1548,7 +2290,7 @@ end
 
 function SB.split_words(query)
     local words = {}
-    for w in tostring(query or ''):lower():gmatch('%S+') do
+    for w in SB.fold(tostring(query or '')):gmatch('%S+') do
         words[#words + 1] = w
     end
     return words
@@ -2242,6 +2984,7 @@ function SB.build_palette()
         C.border      = rgba(0x000000, 0x30)
         C.dim_bg      = rgba(0x1E1E23, 0x40)
         C.warn        = rgba(0xC23B3B)
+        C.folder      = rgba(0x3E8FDB)
     else
         -- Values below are the approved mockup, one for one.
         SB.ink = 0xFFFFFF
@@ -2259,6 +3002,7 @@ function SB.build_palette()
         C.border      = rgba(0x000000, 0x8C)
         C.dim_bg      = rgba(0x000000, 0x88)
         C.warn        = rgba(0xFF8A8A)
+        C.folder      = rgba(0x5AA9F0)
     end
     local ink = SB.ink
     C.frame       = rgba(ink, 0x0D)   -- search field, 5%
@@ -2371,9 +3115,23 @@ function SB.refilter()
             S.sort_col ~= nil)
     end
     if S.sort_col then SB.sort_list(S.shown, S.sort_col, S.sort_dir) end
-    SB.restore_sel()
-    if S.sel > #S.shown then S.sel = #S.shown end
-    if S.sel < 1 then S.sel = 1 end
+    -- A search always shows the flat list of matches, tree or not.
+    S.rows, S.row_of, S.flat = nil, nil, nil
+    if SB.cfg.tree and S.view == 'folders' and S.query == '' then
+        S.flat = S.shown
+        S.rows, S.shown, S.row_of = SB.tree_flatten(
+            SB.build_tree(S.flat), S.froot ~= nil)
+    end
+    local kept = SB.restore_sel()
+    if S.rows and S.sel_path and kept == false then
+        -- The selected project sits in a folder that is folded now. The
+        -- number alone would land on an unrelated row: select nothing, and
+        -- the project comes back selected when its folder opens again.
+        S.sel = 0
+    else
+        if S.sel > #S.shown then S.sel = #S.shown end
+        if S.sel < 1 then S.sel = 1 end
+    end
     SB.sel_prune()
     S.dirty = false
 end
@@ -2479,9 +3237,10 @@ function SB.restore_sel()
     for i, item in ipairs(S.shown) do
         if item.path == S.sel_path then
             S.sel = i
-            return
+            return true
         end
     end
+    return false
 end
 
 local function move_sel(delta, extend)
@@ -2837,14 +3596,15 @@ local function pop_menu_style()
     ImGui.PopStyleVar(ctx, 3)
 end
 
+-- A rail toggle is the same filled button as Rescan, so it never reads as
+-- loose text. On only turns the label blue.
 local function pill_toggle(label, on, width)
-    ImGui.PushStyleColor(ctx, ImGui.Col_Button, on and C.tab_on or C.clear)
-    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonHovered,
-        on and C.tab_on or C.button)
-    ImGui.PushStyleColor(ctx, ImGui.Col_ButtonActive, C.button_hov)
-    ImGui.PushStyleColor(ctx, ImGui.Col_Text, on and C.accent or C.text_dim)
+    ImGui.PushStyleVar(ctx, ImGui.StyleVar_ButtonTextAlign, 0.5, 0.5)
+    ImGui.PushStyleColor(ctx, ImGui.Col_Button, C.button)
+    ImGui.PushStyleColor(ctx, ImGui.Col_Text, on and C.accent or C.text)
     local clicked = ImGui.Button(ctx, label, width or 0)
-    ImGui.PopStyleColor(ctx, 4)
+    ImGui.PopStyleColor(ctx, 2)
+    ImGui.PopStyleVar(ctx)
     return clicked
 end
 local RAIL_W, DETAIL_W, BODY_GAP = 150, 196, 8
@@ -2861,6 +3621,56 @@ end
 local function draw_cross(dl, cx, cy, r, col)
     ImGui.DrawList_AddLine(dl, cx - r, cy - r, cx + r, cy + r, col, PX(1.5))
     ImGui.DrawList_AddLine(dl, cx - r, cy + r, cx + r, cy - r, col, PX(1.5))
+end
+
+-- Folder tree icons, drawn so there are no image assets to ship.
+local function draw_chevron(dl, cx, cy, r, col, open)
+    -- One stroked path, not two lines: two separate lines left a notch
+    -- at the tip where their square ends met.
+    ImGui.DrawList_PathClear(dl)
+    if open then
+        ImGui.DrawList_PathLineTo(dl, cx - r, cy - r * 0.5)
+        ImGui.DrawList_PathLineTo(dl, cx, cy + r * 0.5)
+        ImGui.DrawList_PathLineTo(dl, cx + r, cy - r * 0.5)
+    else
+        ImGui.DrawList_PathLineTo(dl, cx - r * 0.5, cy - r)
+        ImGui.DrawList_PathLineTo(dl, cx + r * 0.5, cy)
+        ImGui.DrawList_PathLineTo(dl, cx - r * 0.5, cy + r)
+    end
+    ImGui.DrawList_PathStroke(dl, col, 0, PX(1.8))
+end
+
+local function draw_folder_icon(dl, x, y, w, h, col)
+    ImGui.DrawList_AddRectFilled(dl, x, y, x + w * 0.45, y + h * 0.4, col, PX(2))
+    ImGui.DrawList_AddRectFilled(dl, x, y + h * 0.18, x + w, y + h, col, PX(2))
+end
+
+local function draw_doc_icon(dl, x, y, w, h, col)
+    ImGui.DrawList_AddRect(dl, x, y, x + w, y + h, col, PX(2), 0, PX(1.2))
+    ImGui.DrawList_AddLine(dl, x + w * 0.25, y + h * 0.4, x + w * 0.75,
+        y + h * 0.4, col, PX(1))
+    ImGui.DrawList_AddLine(dl, x + w * 0.25, y + h * 0.65, x + w * 0.75,
+        y + h * 0.65, col, PX(1))
+end
+
+-- Start of the NAME cell in the tree: indent, chevron (folders), icon.
+-- Leaves the cursor where the text goes.
+local function tree_lead(dl, depth, folder, open, hot)
+    local x, y = ImGui.GetCursorScreenPos(ctx)
+    local lh = ImGui.GetTextLineHeight(ctx)
+    local x0 = x + PX(SB.TREE_INDENT * depth)
+    local cy = y + lh / 2
+    if folder then
+        draw_chevron(dl, x0 + PX(8), cy, PX(3.6),
+            hot and C.text_bright or C.text_dim, open)
+        draw_folder_icon(dl, x0 + PX(22), cy - PX(6), PX(16), PX(12.5),
+            C.folder)
+    else
+        draw_doc_icon(dl, x0 + PX(24), cy - PX(7), PX(11), PX(14),
+            C.text_faint)
+    end
+    ImGui.Dummy(ctx, PX(SB.TREE_INDENT * depth + 50), 1)
+    ImGui.SameLine(ctx, 0, 0)
 end
 
 -- A button whose face is drawn, not typed. Returns true when clicked.
@@ -2940,7 +3750,8 @@ local function draw_top_bar()
     local what = S.view == 'templates' and 'templates'
         or S.view == 'folders' and 'projects' or 'recent projects'
     local changed, query = ImGui.InputTextWithHint(ctx, '##search',
-        ('Type to search %d %s...'):format(#S.shown, what), S.query)
+        ('Type to search %d %s...'):format(
+            S.flat and #S.flat or #S.shown, what), S.query)
     if changed then
         S.query = query
         S.sel = 1
@@ -3253,6 +4064,7 @@ local function draw_folder_rail()
                 -- into it first. Without this, rescanning one folder would
                 -- delete the rest, on disk too.
                 SB.scan_start({ root }, SB.cfg.depth)
+                SB.scan.partial = base
                 for _, it in ipairs(S.items) do
                     if it.root and SB.root_key(it.root) ~= SB.root_key(base) then
                         SB.scan.found[#SB.scan.found + 1] = it
@@ -3297,7 +4109,7 @@ local function draw_folder_rail()
     -- scan, so a file that is gone is a stale cache entry and Rescan is the
     -- answer to it.
     ImGui.Dummy(ctx, 1, PX(10))
-    ImGui.PushStyleVar(ctx, ImGui.StyleVar_ButtonTextAlign, 0, 0.5)
+    ImGui.PushStyleVar(ctx, ImGui.StyleVar_ButtonTextAlign, 0.5, 0.5)
     if SB.scan.running then
         if ImGui.Button(ctx, 'Stop scan', -1) then
             SB.scan.queue = {}
@@ -3314,6 +4126,15 @@ local function draw_folder_rail()
         hint('Looks through your folders again')
     end
     ImGui.PopStyleVar(ctx)
+
+    -- Lives here, always in the same place, instead of in the column
+    -- header where it moved with the columns and covered them.
+    if pill_toggle('Tree view', SB.cfg.tree, -1) then
+        SB.cfg.tree = not SB.cfg.tree
+        set_bool('tree', SB.cfg.tree)
+        S.dirty = true
+    end
+    hint('Shows your folders as a tree')
 end
 
 local function draw_rail(height)
@@ -3451,10 +4272,16 @@ function SB.fit_text(txt, max_w, from_left)
         end
         return dots .. out
     end
-    while #out > 1 and out:byte(#out) >= 0x80 and out:byte(#out) < 0xC0 do
-        out = out:sub(1, #out - 1)
+    -- Find where the last character starts and drop it only if the cut left
+    -- it incomplete. A whole accented letter at the end stays.
+    local i = #out
+    while i > 1 and out:byte(i) >= 0x80 and out:byte(i) < 0xC0 do
+        i = i - 1
     end
-    if (out:byte(#out) or 0) >= 0xC0 then out = out:sub(1, #out - 1) end
+    local lead = out:byte(i) or 0
+    local need = lead >= 0xF0 and 4 or lead >= 0xE0 and 3
+        or lead >= 0xC0 and 2 or 1
+    if #out - i + 1 < need then out = out:sub(1, i - 1) end
     return out .. dots
 end
 
@@ -3510,11 +4337,32 @@ local function draw_multi_menu()
     end
 end
 
+-- One folder row of the tree. The whole row is the click target.
+local function draw_tree_folder(dl, trow)
+    local node = trow.folder
+    ImGui.TableNextRow(ctx)
+    list_font()
+    ImGui.TableSetColumnIndex(ctx, 0)
+    local clicked = ImGui.Selectable(ctx, '##dir' .. node.key, false,
+        ImGui.SelectableFlags_SpanAllColumns)
+    local hot = ImGui.IsItemHovered(ctx)
+    if clicked then
+        SB.tree_toggle(node)
+        S.dirty = true
+    end
+    if ImGui.TableSetColumnIndex(ctx, 2) then
+        tree_lead(dl, trow.depth, true, trow.open, hot)
+        ImGui.TextColored(ctx, C.text_bright, node.name)
+        ImGui.SameLine(ctx)
+        ImGui.TextColored(ctx, C.text_faint, ('%d'):format(node.count))
+    end
+end
+
 local function draw_list(width, height)
     panel('list', width, height, PX(10), PX(8), function()
         ImGui.PushFont(ctx, nil, LFS(BASE_FONT))
 
-        if #S.shown == 0 then
+        if #S.shown == 0 and not (S.rows and #S.rows > 0) then
             S.scroll_to = false
             ImGui.PopFont(ctx)
             ImGui.PushFont(ctx, nil, FS(BASE_FONT))
@@ -3579,9 +4427,11 @@ local function draw_list(width, height)
         -- their own remembered layout rather than fighting over one.
         -- The time toggle is in the key too, so MODIFIED gets the width that
         -- fits what it shows.
-        local table_id = ('items_v2#%s_%d_%d%s'):format(tostring(S.view),
+        -- The tree has its own layout (no FOLDER column), so its own id.
+        local tree_cols = SB.cfg.tree and S.view == 'folders'
+        local table_id = ('items_v2#%s_%d_%d%s%s'):format(tostring(S.view),
             math.floor(SB.ui.scale * 100 + 0.5), math.floor(SB.ui.font * 100 + 0.5),
-            SB.cfg.show_time and '_t' or '')
+            SB.cfg.show_time and '_t' or '', tree_cols and '_tree' or '')
         if ImGui.BeginTable(ctx, table_id, 7, flags, 0, table_h) then
             -- Inside a scrolling table the cells belong to an inner window, so
             -- the draw list has to be fetched here, not before BeginTable.
@@ -3604,7 +4454,7 @@ local function draw_list(width, height)
             ImGui.TableSetupColumn(ctx,
                 S.view == 'folders' and 'FOLDER' or 'PATH',
                 ImGui.TableColumnFlags_WidthStretch |
-                (tpl and ImGui.TableColumnFlags_DefaultHide or 0), 38)
+                ((tpl or tree_cols) and ImGui.TableColumnFlags_DefaultHide or 0), 38)
             ImGui.TableSetupColumn(ctx, 'MODIFIED',
                 ImGui.TableColumnFlags_WidthFixed |
                 ImGui.TableColumnFlags_PreferSortDescending |
@@ -3658,7 +4508,8 @@ local function draw_list(width, height)
                         S.sort_dir ~= desc) then
                     S.sort_col = col
                     S.sort_dir = dir == ImGui.SortDirection_Descending
-                    if not SB.sort_list(S.shown, S.sort_col, S.sort_dir) then
+                    if S.flat then S.dirty = true end
+                    if not SB.sort_list(S.flat or S.shown, S.sort_col, S.sort_dir) then
                         S.sort_col, S.sort_dir = nil, nil
                         -- ImGui keeps the header's sort arrow, so without this
                         -- the refusal would be retried on every single frame.
@@ -3673,15 +4524,23 @@ local function draw_list(width, height)
                 S.dirty = true
             end
 
-            ImGui.ListClipper_Begin(SB.clipper, #S.shown)
+            ImGui.ListClipper_Begin(SB.clipper, S.rows and #S.rows or #S.shown)
             if S.scroll_to and rawget(ImGui, 'ListClipper_IncludeItemByIndex') then
-                ImGui.ListClipper_IncludeItemByIndex(SB.clipper, S.sel - 1)
+                ImGui.ListClipper_IncludeItemByIndex(SB.clipper,
+                    (S.row_of and S.row_of[S.sel] or S.sel) - 1)
             end
             while ImGui.ListClipper_Step(SB.clipper) do
                 local first, last = ImGui.ListClipper_GetDisplayRange(SB.clipper)
                 for row = first, last - 1 do
                     local i = row + 1
-                    local item = S.shown[i]
+                    local trow = S.rows and S.rows[i]
+                    if trow then
+                        i = trow.idx
+                        if trow.folder then
+                            draw_tree_folder(dl, trow)
+                        end
+                    end
+                    local item = i and S.shown[i]
                     if item then
                         ImGui.TableNextRow(ctx)
                         list_font()
@@ -3850,6 +4709,7 @@ local function draw_list(width, height)
                         end
 
                         if ImGui.TableSetColumnIndex(ctx, 2) then
+                            if trow then tree_lead(dl, trow.depth, false) end
                             if item.missing then
                                 ImGui.TextColored(ctx, C.warn, '! ' .. item.name)
                             elseif is_sel then
@@ -3886,7 +4746,7 @@ local function draw_list(width, height)
 
                         if ImGui.TableSetColumnIndex(ctx, 6) then
                             SB.value_of(item, 6)
-                            right_text(item.bpm and ('%g'):format(item.bpm)
+                            right_text(item.bpm and SB.fmt_tempo(item.bpm)
                                 or '-', C.text_dim)
                         end
                     end
@@ -3983,6 +4843,82 @@ local function link_row(key, value, id)
     return hit
 end
 
+-- Label/value pairs in two columns. An entry is { key, value } or
+-- { key, value, id, tip } for a row that opens something; returns the id of
+-- the one clicked. When any pair would not fit its half, falls back to the
+-- one-column rows so nothing is drawn over its label.
+local function kv_grid(left, right)
+    local avail = ImGui.GetContentRegionAvail(ctx)
+    -- What each column needs: its widest label + value, plus a small gap.
+    local need = {}
+    for c, list in ipairs({ left, right }) do
+        need[c] = 0
+        for _, e in ipairs(list) do
+            need[c] = math.max(need[c], ImGui.CalcTextSize(ctx, e[1])
+                + ImGui.CalcTextSize(ctx, e[2]) + PX(10))
+        end
+    end
+    -- Two equal halves when both fit. Otherwise the wider column takes what
+    -- it needs and the other gets the rest: a long tempo or time signature
+    -- no longer drops the whole grid to one column. One column only when
+    -- the panel truly cannot hold both.
+    local gap = PX(14)
+    local col_ws = { (avail - gap) / 2, (avail - gap) / 2 }
+    local fits = need[1] <= col_ws[1] and need[2] <= col_ws[2]
+    if not fits then
+        gap = PX(8)
+        local extra = avail - gap - need[1] - need[2]
+        if extra >= 0 then
+            col_ws = { need[1] + extra / 2, need[2] + extra / 2 }
+            fits = true
+        end
+    end
+    local hit
+    if not fits then
+        for _, list in ipairs({ left, right }) do
+            for _, e in ipairs(list) do
+                if e[3] then
+                    if link_row(e[1], e[2], e[3]) then hit = e[3] end
+                    if e[4] then hint(e[4]) end
+                else
+                    kv(e[1], e[2])
+                end
+            end
+        end
+        return hit
+    end
+    local x0 = ImGui.GetCursorPosX(ctx)
+    for i = 1, math.max(#left, #right) do
+        for c, list in ipairs({ left, right }) do
+            local e = list[i]
+            local col_w = col_ws[c]
+            local cx = x0 + (c - 1) * (col_ws[1] + gap)
+            if e then
+                if c == 2 and left[i] then
+                    ImGui.SameLine(ctx, cx)
+                else
+                    ImGui.SetCursorPosX(ctx, cx)
+                end
+                local vw = ImGui.CalcTextSize(ctx, e[2])
+                if e[3] then
+                    ImGui.PushStyleColor(ctx, ImGui.Col_Text, C.text_faint)
+                    if ImGui.Selectable(ctx, e[1] .. '##' .. e[3], false, 0,
+                            col_w, 0) then
+                        hit = e[3]
+                    end
+                    ImGui.PopStyleColor(ctx)
+                    if e[4] then hint(e[4]) end
+                else
+                    ImGui.TextColored(ctx, C.text_faint, e[1])
+                end
+                ImGui.SameLine(ctx, cx + col_w - vw)
+                ImGui.TextColored(ctx, e[3] and C.accent or C.text, e[2])
+            end
+        end
+    end
+    return hit
+end
+
 -- The panel while the list of a project's backups is showing.
 local function draw_backups(item)
     local list = SB.backups_of(item.path)
@@ -4063,6 +4999,119 @@ local function draw_backups(item)
     bk.open = nil
 end
 
+-- Round Play/Stop at the start of the player row, under the name and path.
+-- Name and path always sit on top, the same with or without a preview, so
+-- they keep the full width. Returns the button size so the bar matches it.
+local function draw_prox_button(item, prox)
+    local d = PX(26)
+    local x, y = ImGui.GetCursorScreenPos(ctx)
+    local clicked = ImGui.InvisibleButton(ctx, '##proxplay', d, d)
+    local hot = ImGui.IsItemHovered(ctx)
+    local playing = SB.px.id ~= nil and SB.px.item == item.path
+    hint(playing and 'Stops the preview'
+        or 'Plays the preview file saved with this project (.RPP-PROX)')
+    local dl = ImGui.GetWindowDrawList(ctx)
+    local cx, cy, r = x + d / 2, y + d / 2, d / 2
+    ImGui.DrawList_AddCircleFilled(dl, cx, cy, r,
+        hot and C.button_hov or C.button, 32)
+    if playing then
+        local q = r * 0.34
+        ImGui.DrawList_AddRectFilled(dl, cx - q, cy - q, cx + q, cy + q,
+            C.accent, PX(1.5))
+    else
+        local q = r * 0.42
+        ImGui.DrawList_AddTriangleFilled(dl, cx - q * 0.7, cy - q,
+            cx - q * 0.7, cy + q, cx + q, cy, C.text)
+    end
+
+    if clicked then
+        if playing then SB.prox_stop()
+        elseif not SB.prox_start(item.path, prox, 0) then
+            set_status('Could not play the preview')
+        end
+    end
+    return d
+end
+
+-- A bar that jumps where you click, with the time at its end. The time is
+-- always there (dim when stopped), so nothing moves when Play starts.
+local function draw_prox_bar(item, prox, len, row_h)
+    local playing = SB.px.id ~= nil and SB.px.item == item.path
+    local pos = playing and SB.prox_pos() or 0
+    playing = SB.px.id ~= nil and SB.px.item == item.path
+    local dur = len
+
+    ImGui.PushFont(ctx, nil, FS(11))
+    -- Every digit sits in a cell as wide as the widest digit, and the
+    -- current time is padded to the length of the total: the font's digits
+    -- are not all the same width, so plain text shifted as it counted up.
+    local total = SB.clock(dur)
+    local now = SB.clock(pos)
+    now = (' '):rep(math.max(0, #total - #now)) .. now
+    local cell = 0
+    for d = 0, 9 do
+        cell = math.max(cell, (ImGui.CalcTextSize(ctx, tostring(d))))
+    end
+    local sep = ' / '
+    local function width_of(str)
+        local w = 0
+        for ch in str:gmatch('.') do
+            w = w + ((ch:match('[%d ]')) and cell or ImGui.CalcTextSize(ctx, ch))
+        end
+        return w
+    end
+    local time_w = width_of(now) + ImGui.CalcTextSize(ctx, sep) + width_of(total)
+    -- A little room on the right: the panel edge clipped the last digit.
+    local right_pad = PX(6)
+    local avail = ImGui.GetContentRegionAvail(ctx)
+    local bar_w = math.max(PX(20), avail - time_w - right_pad - PX(10))
+    local bar_h = row_h or ImGui.GetTextLineHeight(ctx)
+    local x, y = ImGui.GetCursorScreenPos(ctx)
+    local clicked = ImGui.InvisibleButton(ctx, '##proxbar', bar_w, bar_h)
+    local hot = ImGui.IsItemHovered(ctx)
+    hint('Click to jump to that point')
+    local dl = ImGui.GetWindowDrawList(ctx)
+    local mid = y + bar_h / 2
+    ImGui.DrawList_AddRectFilled(dl, x, mid - PX(2), x + bar_w, mid + PX(2),
+        C.button_hov, PX(2))
+    local frac = (dur > 0) and math.max(0, math.min(1, pos / dur)) or 0
+    ImGui.DrawList_AddRectFilled(dl, x, mid - PX(2), x + bar_w * frac,
+        mid + PX(2), C.accent, PX(2))
+    if playing or hot then
+        ImGui.DrawList_AddRectFilled(dl, x + bar_w * frac - PX(3), mid - PX(5),
+            x + bar_w * frac + PX(3), mid + PX(5), C.accent, PX(3))
+    end
+    local col = playing and C.text_dim or C.text_faint
+    local tx = x + avail - right_pad - time_w
+    local ty = y + (bar_h - ImGui.GetTextLineHeight(ctx)) / 2
+    local function draw_cells(str)
+        for ch in str:gmatch('.') do
+            if ch:match('[%d ]') then
+                if ch ~= ' ' then
+                    local cw = ImGui.CalcTextSize(ctx, ch)
+                    ImGui.DrawList_AddText(dl, tx + (cell - cw) / 2, ty, col, ch)
+                end
+                tx = tx + cell
+            else
+                ImGui.DrawList_AddText(dl, tx, ty, col, ch)
+                tx = tx + ImGui.CalcTextSize(ctx, ch)
+            end
+        end
+    end
+    draw_cells(now)
+    ImGui.DrawList_AddText(dl, tx, ty, col, sep)
+    tx = tx + ImGui.CalcTextSize(ctx, sep)
+    draw_cells(total)
+    ImGui.PopFont(ctx)
+    if clicked then
+        local mx = ImGui.GetMousePos(ctx)
+        local want = math.max(0, math.min(1, (mx - x) / math.max(1, bar_w)))
+        if not SB.prox_start(item.path, prox, want) then
+            set_status('Could not play the preview')
+        end
+    end
+end
+
 local function draw_detail(width, height)
     panel('detail', width, height, PX(12), PX(9), function()
         if S.msel_n > 1 then
@@ -4085,6 +5134,7 @@ local function draw_detail(width, height)
         -- Before this, a long name plus a full set of metadata simply pushed
         -- the buttons past the bottom edge, where they could not be clicked.
         local tpl = item.kind == 'template'
+        local CHK_PAD = PX(2)
         local avail_h   = select(2, ImGui.GetContentRegionAvail(ctx))
         local gap       = select(2, ImGui.GetStyleVar(ctx, ImGui.StyleVar_ItemSpacing))
         -- A template puts Open on its own line and the other three on one
@@ -4095,50 +5145,72 @@ local function draw_detail(width, height)
         -- Side by side when the panel is wide enough, else one to a line.
         local checks = item.kind == 'project' or tpl
         local space_x = ImGui.GetStyleVar(ctx, ImGui.StyleVar_ItemSpacing)
-        local box = ImGui.GetFrameHeight(ctx)
+        -- Small boxes, the size of the text: full-height frames made the
+        -- three checks taller than the buttons under them.
+        local chk_h = ImGui.GetTextLineHeight(ctx) + CHK_PAD * 2
         local one_line = false
+        local checks_h = 0
         if checks then
-            local need = box * 2 + space_x * 3
+            local need = chk_h * 2 + space_x * 4
                 + ImGui.CalcTextSize(ctx, 'FX offline')
                 + ImGui.CalcTextSize(ctx, 'Read-only')
             one_line = need <= ImGui.GetContentRegionAvail(ctx)
             -- A template opens as a new project: nothing to lock, and no
             -- saved FX state to bring back. FX offline is its only check.
-            rows = rows + (tpl and 1 or one_line and 2 or 3)
+            local n = tpl and 1 or one_line and 2 or 3
+            checks_h = (chk_h + gap) * n
         end
         local buttons_h = ImGui.GetFrameHeight(ctx) * rows + gap * (rows - 1)
-        local info_h    = avail_h - buttons_h - gap
+        local info_h    = avail_h - buttons_h - checks_h - gap
 
         local room = info_h > ImGui.GetTextLineHeight(ctx)
         if room and ImGui.BeginChild(ctx, 'info', 0, info_h) then
+            -- A project with a playable preview gets one row under the
+            -- path: round Play, the bar and the time. Name and path stay
+            -- on top at full width, with or without a preview.
+            -- The lookup waits for the row to settle, like the metadata, so
+            -- holding Down through the list does not open every PROX. A
+            -- project already looked up shows its player at once. Until then
+            -- only name and path draw; the player row appears once, a
+            -- moment after the row settles.
+            local settled = SB.meta_cache[item.path] ~= nil or
+                reaper.time_precise() - (S.sel_at or 0) > 0.12
+            local prox = nil
+            if item.kind == 'project' and not item.missing
+                    and SB.prox_available()
+                    and (settled or SB.px_found[item.path] ~= nil) then
+                prox = SB.prox_for(item.path)
+            end
+            local prox_len = prox and (settled or SB.px_len[prox] ~= nil)
+                and SB.prox_len(prox)
+            if not prox_len then prox = nil end
             ImGui.PushFont(ctx, nil, FS(15))
             ImGui.TextWrapped(ctx, item.name)
             ImGui.PopFont(ctx)
 
             ImGui.PushFont(ctx, nil, FS(11))
-            if tpl then
-                -- One line, trimmed from the front: the folder it is in is
-                -- the part that identifies it. The whole path is one hover
-                -- away in the status bar.
-                local w = ImGui.GetContentRegionAvail(ctx)
-                ImGui.TextColored(ctx, C.text_faint,
-                    SB.fit_text(item.dir, w, true))
-                hint(item.dir)
-            else
-                ImGui.PushStyleColor(ctx, ImGui.Col_Text, C.text_faint)
-                ImGui.TextWrapped(ctx, item.dir)
-                ImGui.PopStyleColor(ctx)
-            end
+            -- One line, trimmed from the front: the folder it is in is
+            -- the part that identifies it. The whole path is one hover
+            -- away in the status bar.
+            local pw = ImGui.GetContentRegionAvail(ctx)
+            ImGui.TextColored(ctx, C.text_faint,
+                SB.fit_text(item.dir, pw, true))
+            hint(item.dir)
             ImGui.PopFont(ctx)
+
+            -- Player row: round Play, the bar, the time, all on one line.
+            if prox then
+                ImGui.Dummy(ctx, 1, PX(2))
+                local d = draw_prox_button(item, prox)
+                ImGui.SameLine(ctx, 0, PX(10))
+                draw_prox_bar(item, prox, prox_len, d)
+            end
 
             ImGui.Dummy(ctx, 1, PX(4))
             ImGui.Separator(ctx)
             ImGui.Dummy(ctx, 1, PX(2))
 
             if item.when == nil then item.when = SB.file_mtime(item.path) or false end
-
-            local settled = SB.meta_cache[item.path] ~= nil or
-                reaper.time_precise() - (S.sel_at or 0) > 0.12
 
             if item.missing then
                 ImGui.TextColored(ctx, C.warn, 'File is missing.')
@@ -4152,7 +5224,7 @@ local function draw_detail(width, height)
                         -- fourteen track names they were sitting on top of.
                         local bits = {}
                         if meta.tempo then
-                            bits[#bits + 1] = ('%g BPM'):format(meta.tempo)
+                            bits[#bits + 1] = SB.fmt_tempo(meta.tempo) .. ' BPM'
                             bits[#bits + 1] = ('%d/%d')
                                 :format(meta.num or 4, meta.den or 4)
                         end
@@ -4170,31 +5242,36 @@ local function draw_detail(width, height)
                                 table.concat(bits, '  \194\183  '))
                         end
                     else
+                    -- Two columns: the project's shape on the left, what is
+                    -- in it on the right. Half the height of one list.
+                    local left, right = {}, {}
                     if meta.tempo then
-                        kv('Tempo', ('%g BPM'):format(meta.tempo))
-                        kv('Time', ('%d/%d'):format(meta.num or 4, meta.den or 4))
+                        left[#left + 1] = { 'Tempo', SB.fmt_tempo(meta.tempo) }
+                        left[#left + 1] = { 'Time',
+                            ('%d/%d'):format(meta.num or 4, meta.den or 4) }
+                    end
+                    if meta.length and meta.length > 0 then
+                        left[#left + 1] = { 'Length', SB.human_time(meta.length) }
                     end
                     if meta.srate then
-                        kv('Sample rate', ('%.1f kHz'):format(meta.srate / 1000))
+                        left[#left + 1] = { 'Rate',
+                            ('%gk'):format(math.floor(meta.srate / 100 + 0.5) / 10) }
                     end
-                    kv('Tracks', tostring(meta.tracks))
-                    kv('Items', tostring(meta.items))
-                    if meta.length and meta.length > 0 then
-                        kv('Length', SB.human_time(meta.length))
-                    end
+                    right[#right + 1] = { 'Tracks', tostring(meta.tracks) }
+                    right[#right + 1] = { 'Items', tostring(meta.items) }
                     -- Only listed once the row has settled, and cached per
                     -- project, so moving through the list never lists a folder
                     -- more than once.
                     local backups = item.kind == 'project'
                         and SB.backups_of(item.path) or {}
                     if #backups > 0 then
-                        if link_row('Backups', tostring(#backups), 'bk') then
-                            S.bk = { path = item.path, sel = 1 }
-                        end
-                        hint('Shows the saved backups of this project')
+                        right[#right + 1] = { 'Backups', tostring(#backups), 'bk',
+                            'Shows the saved backups of this project' }
+                    end
+                    if kv_grid(left, right) == 'bk' then
+                        S.bk = { path = item.path, sel = 1 }
                     end
                     end
-
 
                     -- What the template actually sets up. Every other
                     -- launcher makes you open it to find out.
@@ -4254,6 +5331,7 @@ local function draw_detail(width, height)
         if room then ImGui.EndChild(ctx) end
 
         if checks then
+            ImGui.PushStyleVar(ctx, ImGui.StyleVar_FramePadding, CHK_PAD, CHK_PAD)
             local rv1, off = ImGui.Checkbox(ctx, 'FX offline', S.chk_offline)
             if rv1 then
                 S.chk_offline = off
@@ -4272,6 +5350,7 @@ local function draw_detail(width, height)
                 ImGui.EndDisabled(ctx)
                 hint('Needs FX offline. The plug-ins come back once it has loaded')
             end
+            ImGui.PopStyleVar(ctx)
         end
 
         ImGui.PushStyleColor(ctx, ImGui.Col_Button, C.accent_dim)
@@ -4319,7 +5398,7 @@ end
 local function draw_status()
     local content_w = ImGui.GetContentRegionAvail(ctx)
     ImGui.PushFont(ctx, nil, FS(11))
-    local shown, total = #S.shown, #S.items
+    local shown, total = S.flat and #S.flat or #S.shown, #S.items
     local text
     local undoing = S.undo and not S.hint
         and reaper.time_precise() - S.undo.at < SB.UNDO_SECONDS
@@ -4580,6 +5659,14 @@ local function settings_general()
     end
     hint('Off means it closes as soon as a project opens')
 
+    local rvc, check = ImGui.Checkbox(ctx,
+        'Check folders for changes on open', SB.cfg.check_open)
+    if rvc then
+        SB.cfg.check_open = check
+        set_bool('check_open', check)
+    end
+    hint('Looks for new, removed or changed projects in your folders and rescans only if it finds any')
+
     ImGui.Dummy(ctx, 1, PX(4))
     ImGui.Separator(ctx)
     ImGui.Dummy(ctx, 1, PX(2))
@@ -4776,7 +5863,7 @@ local function draw_dialog()
     if d.line then
         ImGui.Dummy(ctx, 1, PX(2))
         ImGui.TextColored(ctx, C.text_dim, SB.fit_text(d.line,
-            ImGui.GetContentRegionAvail(ctx)))
+            (ImGui.GetContentRegionAvail(ctx))))
     end
     ImGui.Dummy(ctx, 1, PX(6))
     local done = ImGui.IsKeyPressed(ctx, ImGui.Key_Escape)
@@ -4843,6 +5930,14 @@ local function handle_keys()
         move_sel(-#S.shown, extend)
     end
     if ImGui.IsKeyPressed(ctx, ImGui.Key_End) then move_sel(#S.shown, extend) end
+    -- Tree: Left folds the folder the selected project is in.
+    if S.rows and S.query == '' and ImGui.IsKeyPressed(ctx, ImGui.Key_LeftArrow) then
+        local row = S.rows[S.row_of[S.sel] or 0]
+        if row and row.parent and SB.tree_is_open(row.parent) then
+            SB.tree_toggle(row.parent)
+            S.dirty = true
+        end
+    end
 
     local enter = ImGui.IsKeyPressed(ctx, ImGui.Key_Enter) or
         ImGui.IsKeyPressed(ctx, ImGui.Key_KeypadEnter)
@@ -4899,6 +5994,33 @@ end
 
 function SB.frame()
     draw_surface()
+
+    SB.px_sweep()
+
+    -- The preview belongs to the selected project only.
+    if SB.px.id then
+        local cur = selected()
+        if S.msel_n > 1 or not cur or cur.path ~= SB.px.item or S.bk then
+            SB.prox_stop()
+        else
+            SB.prox_pos()
+        end
+    end
+
+    if SB.chk.running then
+        if SB.scan.running then
+            SB.chk.running = false
+        else
+            SB.chk_step(0.004)
+        end
+    end
+    if SB.chk.changed and not SB.chk.running then
+        SB.chk.changed = false
+        if not SB.scan.running then
+            SB.scan_start(SB.cfg.roots, SB.cfg.depth)
+            set_status('Folders changed, refreshing...')
+        end
+    end
 
     if SB.scan.running then
         local more = SB.scan_step(4)
@@ -5125,6 +6247,7 @@ end
 -- carries on from inside the dialog (a second chain is started first) but
 -- draws nothing until the command comes back.
 local function step_pending()
+    SB.prox_stop()
     S.pending.frames = S.pending.frames + 1
     if S.pending.frames < 2 then
         reaper.defer(loop)
@@ -5149,6 +6272,7 @@ end
 
 loop = function()
     if S.quit then
+        SB.prox_stop()
         -- Main window closed with FX still coming online: only the
         -- progress window is left.
         if SB.fx_job then SB.guard('progress', fx_job_window) end
@@ -5248,7 +6372,13 @@ function SB.main()
 
     SB.cfg_load()
     SB.build_palette()
+    -- Leftovers of a crashed session (temp preview WAVs).
+    for n = 0, SB.PX_SLOTS - 1 do
+        SB.px_delete(SB.join(SB.cache_path(), ('prox-preview-%d.wav'):format(n)))
+    end
     reaper.atexit(function()
+        SB.prox_stop()
+        SB.px_sweep(true)
         SB.fx_online_finish()
         reaper.DeleteExtState(SB.EXTNAME, 'heartbeat', false)
         reaper.DeleteExtState(SB.EXTNAME, 'show_ui', false)
@@ -5286,6 +6416,8 @@ function SB.main()
     SB.reload(S.view)
     if S.view == 'folders' and #SB.cfg.roots > 0 and #S.items == 0 then
         SB.scan_start(SB.cfg.roots, SB.cfg.depth)
+    else
+        SB.chk_start()
     end
     reaper.defer(loop)
 end
