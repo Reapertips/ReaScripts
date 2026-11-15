@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Install guides, videos & troubleshooting
+    url: https://reapertips.com/scripts
+    about: Step-by-step ReaPack setup, requirements, and demo videos for every script.
+  - name: Ask on the Reapertips Discord
+    url: https://discord.gg/BfEnFwjeWZ
+    about: Quick community help if you're stuck installing or setting up REAPER scripts.

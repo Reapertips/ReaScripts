@@ -1,0 +1,35 @@
+name: Suggest a feature or improvement
+description: Request a new feature, shortcut, or workflow tweak
+title: "[Idea]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Got an idea to make one of the scripts better? Pick the script below and describe it in plain words.
+  - type: dropdown
+    id: script
+    attributes:
+      label: Which script?
+      options:
+        - TunerBox
+        - Project Launcher
+        - Time selection color
+        - Speed Trainer
+        - General / New script idea
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like it to do?
+      placeholder: Describe the feature or change you'd like to see...
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: How would it help your workflow?
+      description: Optional. Share when you run into this while mixing or recording.
+    validations:
+      required: false

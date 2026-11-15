@@ -1,0 +1,54 @@
+name: Report a bug
+description: Something is not working right in one of the scripts
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Thanks for reporting this! Pick the script below and share what happened. You don't need to know any coding terms.
+  - type: dropdown
+    id: script
+    attributes:
+      label: Which script?
+      options:
+        - TunerBox
+        - Project Launcher
+        - Time selection color
+        - Speed Trainer
+        - Other / ReaPack setup
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Tell me what went wrong and what you expected instead.
+      placeholder: When I double-click a project, it opens an empty tab instead of loading the file...
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Optional. Quick steps so I can see the same issue on my Mac/PC.
+      placeholder: |
+        1. Open the script
+        2. Click...
+    validations:
+      required: false
+  - type: input
+    id: system
+    attributes:
+      label: OS and REAPER version
+      description: Optional, helps me test on the same setup.
+      placeholder: e.g. macOS 15 / REAPER 7.26 or Windows 11 / REAPER 7.26
+    validations:
+      required: false
+  - type: textarea
+    id: extra
+    attributes:
+      label: Screenshot or error message
+      description: Optional. Paste any error popup text or drag a screenshot straight into this box.
+    validations:
+      required: false
